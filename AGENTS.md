@@ -28,6 +28,13 @@
    - `git checkout main`
    - `git merge --no-ff <your-branch>`
 
+## Never Blindly Merge (MANDATORY)
+
+- Never use automatic conflict-bias strategies blindly (for example: `git merge -X theirs`, `git merge -X ours`, `git checkout --theirs .`, `git checkout --ours .`).
+- If conflicts occur, inspect each conflicted file and resolve intentionally.
+- After conflict resolution, run required verification/tests before pushing.
+- If conflict intent is unclear, stop and ask the user before completing the merge.
+
 ## package.json Version Conflict Rule
 
 - For merge conflicts in `package.json` that only affect the `"version"` field, always ignore the conflict and keep the stashed/local `package.json` version value.
@@ -39,6 +46,10 @@
 - Always create a commit after completing each discrete task or sub-task.
 - Do not batch multiple tasks into a single commit.
 - Each commit message should describe the specific change made.
+
+## Pre-Merge Squash Review (MANDATORY)
+
+- Before merging to local `main`, diff-compare all changes on the current branch against `main`.
 
 ## Tests Documentation Rule (MANDATORY)
 
@@ -70,7 +81,7 @@
   - inspect row HTML and count expected rendered nodes (for example `strong.message-bold-text`)
   - save screenshot to `output/playwright/<task-name>.png`
 - Playwright test sequence (when Playwright is requested):
-  1. Start or confirm a single dev server instance (`npm run dev -- --host 0.0.0.0 --port 4173`).
+  1. Start or confirm a single dev server instance (`pnpm run dev -- --host 0.0.0.0 --port 4173`).
   2. If there are stale servers on the same port, stop them first to avoid false test results.
   3. Run Playwright CLI against `http://127.0.0.1:4173` (or required test URL) and exercise the changed flow.
   4. For responsive/mobile changes, run checks at 375x812 and 768x1024.
@@ -106,9 +117,15 @@
 - Use this flow when validating UI behavior on Oracle A1 from the local Mac machine.
 - On A1, start the app server with Codex CLI available in `PATH`:
   - `export PATH="$HOME/.npm-global/bin:$PATH"`
-  - `npm run dev -- --host 0.0.0.0 --port 4173`
+  - `pnpm run dev -- --host 0.0.0.0 --port 4173`
 - From Mac, run Playwright against Tailscale URL (`http://100.127.77.25:4173`), not localhost.
 - Verify success with both checks:
   - UI assertion in Playwright (new project/folder appears in sidebar or selector).
   - Filesystem assertion on A1 (`test -d /home/ubuntu/<project-name>`).
 - Save screenshot artifact under `output/playwright/` and include it in the report.
+
+## Playwright Evidence For UI Fixes
+
+- When the user asks to test with Playwright, run the verification on the explicitly requested project/thread context (for example `TestChat`).
+- Screenshot artifacts must show complete passing evidence for the tested feature, not only the base page load.
+- For refresh-persistence fixes, include a post-refresh screenshot that still shows the expected UI state.

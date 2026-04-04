@@ -203,6 +203,24 @@
                 }"
               />
             </button>
+            <button
+              class="thread-composer-attach-setting"
+              type="button"
+              role="switch"
+              :aria-checked="isPlanModeSelected"
+              :aria-label="isPlanModeSelected ? 'Disable plan mode' : 'Enable plan mode'"
+              :disabled="disabled || !activeThreadId || isTurnInProgress"
+              @click="toggleCollaborationMode"
+            >
+              <span class="thread-composer-attach-setting-copy">
+                <span class="thread-composer-attach-setting-label">Plan mode</span>
+                <span class="thread-composer-attach-setting-description">Agent proposes a plan before acting</span>
+              </span>
+              <span
+                class="thread-composer-attach-switch"
+                :class="{ 'is-on': isPlanModeSelected }"
+              />
+            </button>
           </div>
         </div>
 
@@ -332,8 +350,18 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import type { ReasoningEffort, SpeedMode } from '../../types/codex'
+import type {
+  CollaborationModeKind,
+  CollaborationModeOption,
+  ReasoningEffort,
+  SpeedMode,
+  UiRateLimitSnapshot,
+  UiRateLimitWindow,
+  UiThreadTokenUsage,
+  UiTokenUsageBreakdown,
+} from '../../types/codex'
 import { useDictation } from '../../composables/useDictation'
+import { useMobile } from '../../composables/useMobile'
 import { searchComposerFiles, uploadFile, type ComposerFileSuggestion } from '../../api/codexGateway'
 import IconTablerArrowUp from '../icons/IconTablerArrowUp.vue'
 import IconTablerBolt from '../icons/IconTablerBolt.vue'
@@ -350,11 +378,15 @@ type SkillItem = { name: string; description: string; path: string }
 const props = defineProps<{
   activeThreadId: string
   cwd?: string
+  collaborationModes?: CollaborationModeOption[]
+  selectedCollaborationMode: CollaborationModeKind
   models: string[]
   selectedModel: string
   selectedReasoningEffort: ReasoningEffort | ''
   selectedSpeedMode: SpeedMode
   skills?: SkillItem[]
+  threadTokenUsage?: UiThreadTokenUsage | null
+  codexQuota?: UiRateLimitSnapshot | null
   isTurnInProgress?: boolean
   isInterruptingTurn?: boolean
   isUpdatingSpeedMode?: boolean
@@ -363,7 +395,6 @@ const props = defineProps<{
   sendWithEnter?: boolean
   inProgressSubmitMode?: 'steer' | 'queue'
   dictationClickToToggle?: boolean
-  prependDraftRequest?: { id: number; text: string } | null
   dictationAutoSend?: boolean
   dictationLanguage?: string
 }>()
@@ -383,7 +414,6 @@ export type SubmitPayload = {
   fileAttachments: FileAttachment[]
   skills: Array<{ name: string; path: string }>
   mode: 'steer' | 'queue'
-  rollbackLatestUserTurn?: boolean
 }
 
 export type ThreadComposerExposed = {
@@ -394,6 +424,7 @@ export type ThreadComposerExposed = {
 const emit = defineEmits<{
   submit: [payload: SubmitPayload]
   interrupt: []
+  'update:selected-collaboration-mode': [mode: CollaborationModeKind]
   'update:selected-model': [modelId: string]
   'update:selected-reasoning-effort': [effort: ReasoningEffort | '']
   'update:selected-speed-mode': [mode: SpeedMode]
@@ -414,6 +445,14 @@ type FolderUploadGroup = {
   isUploading: boolean
 }
 
+type AttachmentBatchStats = {
+  total: number
+  succeeded: number
+  failed: number
+}
+
+const CONTEXT_WINDOW_BASELINE_TOKENS = 12000
+
 const draft = ref('')
 const selectedImages = ref<SelectedImage[]>([])
 const selectedSkills = ref<SkillItem[]>([])
@@ -421,6 +460,8 @@ const fileAttachments = ref<FileAttachment[]>([])
 const folderUploadGroups = ref<FolderUploadGroup[]>([])
 
 const dictationFeedback = ref('')
+const pendingAttachmentCount = ref(0)
+const attachmentBatchStats = ref<AttachmentBatchStats | null>(null)
 const {
   state: dictationState,
   isSupported: isDictationSupported,
@@ -437,10 +478,7 @@ const {
     dictationFeedback.value = ''
     if (props.dictationAutoSend !== false) {
       const mode = props.isTurnInProgress ? activeInProgressMode.value : 'steer'
-      onSubmit(mode, {
-        rollbackLatestUserTurn: mode === 'steer' && dictationShouldRollbackLatestUserTurn,
-      })
-      dictationShouldRollbackLatestUserTurn = false
+      onSubmit(mode)
       return
     }
     nextTick(() => inputRef.value?.focus())
@@ -463,6 +501,7 @@ const photoLibraryInputRef = ref<HTMLInputElement | null>(null)
 const cameraCaptureInputRef = ref<HTMLInputElement | null>(null)
 const folderPickerInputRef = ref<HTMLInputElement | null>(null)
 const inputRef = ref<HTMLTextAreaElement | null>(null)
+const { isMobile } = useMobile()
 const isAttachMenuOpen = ref(false)
 const isSlashMenuOpen = ref(false)
 const mentionStartIndex = ref<number | null>(null)
@@ -474,7 +513,7 @@ const draftGeneration = ref(0)
 let fileMentionSearchToken = 0
 let fileMentionDebounceTimer: ReturnType<typeof setTimeout> | null = null
 let isHoldPressActive = false
-let dictationShouldRollbackLatestUserTurn = false
+let attachmentSessionToken = 0
 const isAndroid = typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent)
 const DRAFT_STORAGE_PREFIX = 'codex-web-local.thread-draft.v1.'
 let lastActiveThreadId = ''
@@ -494,6 +533,11 @@ function formatModelLabel(modelId: string): string {
 const modelOptions = computed(() =>
   props.models.map((modelId) => ({ value: modelId, label: formatModelLabel(modelId) })),
 )
+const isPlanModeSelected = computed(() => props.selectedCollaborationMode === 'plan')
+
+const isPlanModeWaitingForModel = computed(() =>
+  props.selectedCollaborationMode === 'plan' && props.selectedModel.trim().length === 0,
+)
 
 const skillOptions = computed<SkillItem[]>(() => props.skills ?? [])
 const selectedSkillPaths = computed(() => selectedSkills.value.map((s) => s.path))
@@ -509,6 +553,8 @@ const canSubmit = computed(() => {
   if (props.disabled) return false
   if (props.isUpdatingSpeedMode) return false
   if (!props.activeThreadId) return false
+  if (isPlanModeWaitingForModel.value) return false
+  if (pendingAttachmentCount.value > 0) return false
   return draft.value.trim().length > 0 || selectedImages.value.length > 0 || fileAttachments.value.length > 0
 })
 const hasUnsavedDraft = computed(() =>
@@ -553,6 +599,29 @@ const dictationButtonLabel = computed(() => {
 const dictationErrorText = computed(() =>
   dictationState.value === 'idle' ? dictationFeedback.value.trim() : '',
 )
+const attachmentFeedbackText = computed(() => {
+  const stats = attachmentBatchStats.value
+  if (stats) {
+    const completed = stats.succeeded + stats.failed
+    const remaining = Math.max(0, stats.total - completed)
+    if (remaining > 0) {
+      if (stats.failed > 0) {
+        return `${stats.failed} failed, attaching ${formatAttachmentFileCount(remaining)}...`
+      }
+      return remaining === 1 ? 'Attaching file...' : `Attaching ${remaining} files...`
+    }
+    if (stats.failed > 0) {
+      if (stats.succeeded > 0) {
+        return `${stats.succeeded} attached, ${stats.failed} failed.`
+      }
+      return stats.failed === 1 ? 'Could not attach file.' : `Could not attach ${stats.failed} files.`
+    }
+  }
+  if (pendingAttachmentCount.value <= 0) return ''
+  return pendingAttachmentCount.value === 1
+    ? 'Attaching file...'
+    : `Attaching ${pendingAttachmentCount.value} files...`
+})
 const dictationDurationLabel = computed(() => {
   const totalSeconds = Math.max(0, Math.floor(recordingDurationMs.value / 1000))
   const minutes = Math.floor(totalSeconds / 60)
@@ -561,13 +630,240 @@ const dictationDurationLabel = computed(() => {
 })
 
 const placeholderText = computed(() =>
-  props.activeThreadId ? 'Type a message... (@ for files, / for skills)' : 'Select a thread to send a message',
+  !props.activeThreadId
+    ? 'Select a thread to send a message'
+    : isPlanModeWaitingForModel.value
+      ? 'Loading models for plan mode...'
+      : 'Type a message... (@ for files, / for skills)',
 )
 const hasSubmitContent = computed(() =>
   draft.value.trim().length > 0 || selectedImages.value.length > 0 || fileAttachments.value.length > 0,
 )
+const quotaSummaryText = computed(() => buildQuotaSummaryText(props.codexQuota ?? null))
+const quotaWeeklyRefreshText = computed(() => '')
+const quotaTooltipText = computed(() => buildQuotaTooltipText(props.codexQuota ?? null))
+const contextUsageView = computed(() => buildContextUsageView(props.threadTokenUsage ?? null))
+const contextUsageSummaryText = computed(() => contextUsageView.value?.summaryText ?? '')
+const contextUsageTooltipText = computed(() => contextUsageView.value?.tooltipText ?? '')
+const contextUsageRemainingPercent = computed(() => contextUsageView.value?.percentRemaining ?? 0)
+const contextUsageTone = computed(() => contextUsageView.value?.tone ?? 'healthy')
 
-function onSubmit(mode: 'steer' | 'queue' = 'steer', options?: { rollbackLatestUserTurn?: boolean }): void {
+function formatPlanType(planType: string | null | undefined): string {
+  if (!planType || planType === 'unknown') return ''
+  if (planType === 'edu') return 'Education'
+  return `${planType.slice(0, 1).toUpperCase()}${planType.slice(1)}`
+}
+
+function formatWindowSpan(windowMinutes: number | null): string {
+  if (typeof windowMinutes !== 'number' || !Number.isFinite(windowMinutes) || windowMinutes <= 0) return ''
+  if (windowMinutes % 1440 === 0) return `${windowMinutes / 1440}d`
+  if (windowMinutes % 60 === 0) return `${windowMinutes / 60}h`
+  return `${windowMinutes}m`
+}
+
+function formatResetTime(resetsAt: number | null): string {
+  if (typeof resetsAt !== 'number' || !Number.isFinite(resetsAt)) return ''
+  const resetMs = resetsAt * 1000
+  const diffMs = resetMs - Date.now()
+  if (diffMs <= 0) return 'resetting now'
+
+  const totalMinutes = Math.round(diffMs / 60000)
+  if (totalMinutes < 60) return `resets in ${Math.max(1, totalMinutes)}m`
+
+  const totalHours = Math.round(totalMinutes / 60)
+  if (totalHours < 48) return `resets in ${Math.max(1, totalHours)}h`
+
+  const totalDays = Math.round(totalHours / 24)
+  return `resets in ${Math.max(1, totalDays)}d`
+}
+
+function formatResetDate(resetsAt: number | null): string {
+  if (typeof resetsAt !== 'number' || !Number.isFinite(resetsAt)) return ''
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(new Date(resetsAt * 1000))
+}
+
+function formatResetDateCompact(resetsAt: number | null): string {
+  if (typeof resetsAt !== 'number' || !Number.isFinite(resetsAt)) return ''
+  const date = new Date(resetsAt * 1000)
+  return `${date.getMonth() + 1}月${date.getDate()}日`
+}
+
+function pickWeeklyQuotaWindow(quota: UiRateLimitSnapshot): UiRateLimitWindow | null {
+  const windows = [quota.primary, quota.secondary].filter((window): window is UiRateLimitWindow => window !== null)
+  const exactWeekly = windows.find((window) => window.windowMinutes === 7 * 24 * 60)
+  if (exactWeekly) return exactWeekly
+
+  const longerWindows = windows
+    .filter((window) => typeof window.windowMinutes === 'number' && window.windowMinutes >= 7 * 24 * 60)
+    .sort((first, second) => (first.windowMinutes ?? 0) - (second.windowMinutes ?? 0))
+
+  if (longerWindows[0]) return longerWindows[0]
+  return quota.secondary ?? null
+}
+
+function formatWindowSummary(window: UiRateLimitWindow): string {
+  const remainingPercent = Math.max(0, Math.min(100, 100 - Math.round(window.usedPercent)))
+  const span = formatWindowSpan(window.windowMinutes)
+  return span ? `${remainingPercent}% / ${span}` : `${remainingPercent}%`
+}
+
+function buildQuotaSummaryText(quota: UiRateLimitSnapshot | null): string {
+  if (!quota) return ''
+
+  const segments: string[] = []
+  const plan = formatPlanType(quota.planType)
+  if (plan) segments.push(plan)
+  if (quota.primary) segments.push(formatWindowSummary(quota.primary))
+  if (quota.secondary) segments.push(formatWindowSummary(quota.secondary))
+
+  const weeklyWindow = pickWeeklyQuotaWindow(quota)
+  const weeklyRefreshDate = formatResetDateCompact(weeklyWindow?.resetsAt ?? null)
+  if (weeklyRefreshDate) {
+    segments.push(weeklyRefreshDate)
+  }
+
+  if (segments.length === 0 && quota.credits?.unlimited) {
+    segments.push('Unlimited credits')
+  } else if (segments.length === 0 && quota.credits?.hasCredits && quota.credits.balance) {
+    segments.push(`${quota.credits.balance} credits`)
+  }
+
+  return segments.join(' · ')
+}
+
+function buildQuotaTooltipText(quota: UiRateLimitSnapshot | null): string {
+  if (!quota) return ''
+
+  const lines: string[] = []
+  const plan = formatPlanType(quota.planType)
+  if (plan) {
+    lines.push(`Plan: ${plan}`)
+  }
+
+  if (quota.primary) {
+    const reset = formatResetTime(quota.primary.resetsAt)
+    lines.push(`Primary window: ${formatWindowSummary(quota.primary)}${reset ? `, ${reset}` : ''}`)
+  }
+
+  if (quota.secondary) {
+    const reset = formatResetTime(quota.secondary.resetsAt)
+    lines.push(`Secondary window: ${formatWindowSummary(quota.secondary)}${reset ? `, ${reset}` : ''}`)
+  }
+
+  if (quota.credits?.unlimited) {
+    lines.push('Credits: unlimited')
+  } else if (quota.credits?.hasCredits && quota.credits.balance) {
+    lines.push(`Credits: ${quota.credits.balance}`)
+  }
+
+  const weeklyWindow = pickWeeklyQuotaWindow(quota)
+  if (weeklyWindow) {
+    const weeklyRefreshDate = formatResetDate(weeklyWindow.resetsAt)
+    if (weeklyRefreshDate) {
+      lines.push(`Weekly refresh: ${weeklyRefreshDate}`)
+    }
+  }
+
+  return lines.join('\n')
+}
+
+function buildQuotaWeeklyRefreshText(quota: UiRateLimitSnapshot | null): string {
+  if (!quota) return ''
+  const weeklyWindow = pickWeeklyQuotaWindow(quota)
+  if (!weeklyWindow) return ''
+  const weeklyRefreshDate = formatResetDate(weeklyWindow.resetsAt)
+  return weeklyRefreshDate ? `Weekly refresh ${weeklyRefreshDate}` : ''
+}
+
+function formatCompactTokenCount(value: number): string {
+  if (!Number.isFinite(value)) return '0'
+  const absValue = Math.abs(value)
+  if (absValue >= 1_000_000) {
+    const compact = absValue >= 10_000_000 ? (value / 1_000_000).toFixed(0) : (value / 1_000_000).toFixed(1)
+    return `${compact.replace(/\.0$/, '')}M`
+  }
+  if (absValue >= 1_000) {
+    const compact = absValue >= 100_000 ? (value / 1_000).toFixed(0) : (value / 1_000).toFixed(1)
+    return `${compact.replace(/\.0$/, '')}k`
+  }
+  return String(Math.round(value))
+}
+
+function formatBreakdownSummary(breakdown: UiTokenUsageBreakdown): string {
+  const nonCachedInput = Math.max(0, breakdown.inputTokens - breakdown.cachedInputTokens)
+  const parts = [
+    `${formatCompactTokenCount(breakdown.totalTokens)} total`,
+    `${formatCompactTokenCount(nonCachedInput)} input`,
+  ]
+  if (breakdown.cachedInputTokens > 0) {
+    parts.push(`${formatCompactTokenCount(breakdown.cachedInputTokens)} cached`)
+  }
+  if (breakdown.outputTokens > 0) {
+    parts.push(`${formatCompactTokenCount(breakdown.outputTokens)} output`)
+  }
+  if (breakdown.reasoningOutputTokens > 0) {
+    parts.push(`${formatCompactTokenCount(breakdown.reasoningOutputTokens)} reasoning`)
+  }
+  return parts.join(' · ')
+}
+
+function calculateContextPercentRemaining(tokensInContext: number, contextWindow: number): number {
+  // Mirror official Codex normalization so the first prompt does not look artificially "used".
+  if (!Number.isFinite(tokensInContext) || !Number.isFinite(contextWindow) || contextWindow <= 0) {
+    return 0
+  }
+  if (contextWindow <= CONTEXT_WINDOW_BASELINE_TOKENS) {
+    const remaining = Math.max(0, contextWindow - Math.max(0, tokensInContext))
+    return Math.max(0, Math.min(100, Math.round((remaining / contextWindow) * 100)))
+  }
+  const effectiveWindow = contextWindow - CONTEXT_WINDOW_BASELINE_TOKENS
+  const used = Math.max(0, tokensInContext - CONTEXT_WINDOW_BASELINE_TOKENS)
+  const remaining = Math.max(0, effectiveWindow - used)
+  return Math.max(0, Math.min(100, Math.round((remaining / effectiveWindow) * 100)))
+}
+
+function buildContextUsageView(
+  usage: UiThreadTokenUsage | null,
+): {
+    summaryText: string
+    tooltipText: string
+    percentRemaining: number
+    tone: 'healthy' | 'warning' | 'danger'
+  } | null {
+  if (!usage) return null
+
+  const contextWindow = usage.modelContextWindow ?? null
+  if (typeof contextWindow !== 'number' || !Number.isFinite(contextWindow) || contextWindow <= 0) return null
+
+  const tokensInContext = Math.max(0, usage.last.totalTokens)
+  const percentRemaining = calculateContextPercentRemaining(tokensInContext, contextWindow)
+  const percentUsed = Math.max(0, Math.min(100, 100 - percentRemaining))
+  const tone: 'healthy' | 'warning' | 'danger' = percentRemaining <= 15
+    ? 'danger'
+    : percentRemaining <= 35
+      ? 'warning'
+      : 'healthy'
+
+  return {
+    summaryText: `${percentRemaining}% · ${formatCompactTokenCount(tokensInContext)} / ${formatCompactTokenCount(contextWindow)}`,
+    tooltipText: [
+      `Context window: ${percentRemaining}% left (${percentUsed}% used)`,
+      `In context: ${tokensInContext.toLocaleString()} / ${contextWindow.toLocaleString()} tokens`,
+      `Last turn: ${formatBreakdownSummary(usage.last)}`,
+      `Session total: ${formatBreakdownSummary(usage.total)}`,
+    ].join('\n'),
+    percentRemaining,
+    tone,
+  }
+}
+
+function onSubmit(mode: 'steer' | 'queue' = 'steer'): void {
   const text = draft.value.trim()
   if (!canSubmit.value) return
   emit('submit', {
@@ -576,11 +872,14 @@ function onSubmit(mode: 'steer' | 'queue' = 'steer', options?: { rollbackLatestU
     fileAttachments: [...fileAttachments.value],
     skills: selectedSkills.value.map((s) => ({ name: s.name, path: s.path })),
     mode,
-    rollbackLatestUserTurn: options?.rollbackLatestUserTurn === true,
   })
   clearPersistedDraftForThread(props.activeThreadId)
   clearDraftState()
-  if (isAndroid) {
+  folderUploadGroups.value = []
+  isAttachMenuOpen.value = false
+  isSlashMenuOpen.value = false
+  closeFileMention()
+  if (isAndroid || isMobile.value) {
     inputRef.value?.blur()
     return
   }
@@ -606,9 +905,12 @@ function replaceDraftState(payload: ComposerDraftPayload): void {
   fileAttachments.value = payload.fileAttachments.map((attachment) => ({ ...attachment }))
   folderUploadGroups.value = []
   dictationFeedback.value = ''
+  attachmentBatchStats.value = null
+  pendingAttachmentCount.value = 0
   isAttachMenuOpen.value = false
   isSlashMenuOpen.value = false
   closeFileMention()
+  attachmentSessionToken += 1
 }
 
 function clearDraftState(): void {
@@ -711,6 +1013,10 @@ function onModelSelect(value: string): void {
   emit('update:selected-model', value)
 }
 
+function toggleCollaborationMode(): void {
+  emit('update:selected-collaboration-mode', isPlanModeSelected.value ? 'default' : 'plan')
+}
+
 function onReasoningEffortSelect(value: string): void {
   emit('update:selected-reasoning-effort', value as ReasoningEffort)
 }
@@ -724,10 +1030,6 @@ function onDictationToggle(): void {
   if (!props.dictationClickToToggle) return
   if (dictationFeedback.value) {
     dictationFeedback.value = ''
-  }
-  if (dictationState.value === 'idle') {
-    dictationShouldRollbackLatestUserTurn =
-      props.isTurnInProgress === true && activeInProgressMode.value === 'steer'
   }
   toggleRecording()
 }
@@ -748,8 +1050,6 @@ function onDictationPressStart(event: PointerEvent): void {
   if (dictationFeedback.value) {
     dictationFeedback.value = ''
   }
-  dictationShouldRollbackLatestUserTurn =
-    props.isTurnInProgress === true && activeInProgressMode.value === 'steer'
   window.addEventListener('pointerup', onDictationPressEnd)
   window.addEventListener('pointercancel', onDictationPressEnd)
   window.addEventListener('blur', onDictationPressEnd)
@@ -819,6 +1119,156 @@ function addFileAttachment(filePath: string, customLabel?: string): void {
 function isImageFile(file: File): boolean {
   if (file.type.startsWith('image/')) return true
   return /\.(png|jpe?g|gif|webp)$/i.test(file.name)
+}
+
+function normalizeSelectedFiles(files: FileList | File[] | null | undefined): File[] {
+  if (!files) return []
+  return Array.from(files)
+}
+
+function formatAttachmentFileCount(count: number): string {
+  return count === 1 ? '1 file' : `${count} files`
+}
+
+function beginAttachmentWork(sessionToken: number): boolean {
+  if (sessionToken !== attachmentSessionToken) return false
+  pendingAttachmentCount.value += 1
+  return true
+}
+
+function finishAttachmentWork(sessionToken: number): void {
+  if (sessionToken !== attachmentSessionToken) return
+  pendingAttachmentCount.value = Math.max(0, pendingAttachmentCount.value - 1)
+}
+
+function beginAttachmentBatch(total: number): void {
+  if (total <= 0) return
+  const current = attachmentBatchStats.value
+  const completed = current ? current.succeeded + current.failed : 0
+  if (!current || completed >= current.total) {
+    attachmentBatchStats.value = { total, succeeded: 0, failed: 0 }
+    return
+  }
+  attachmentBatchStats.value = {
+    ...current,
+    total: current.total + total,
+  }
+}
+
+function recordAttachmentBatchResult(result: 'success' | 'failure'): void {
+  const current = attachmentBatchStats.value
+  if (!current) return
+  attachmentBatchStats.value = {
+    ...current,
+    succeeded: current.succeeded + (result === 'success' ? 1 : 0),
+    failed: current.failed + (result === 'failure' ? 1 : 0),
+  }
+}
+
+function createAttachmentId(): string {
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
+function createPastedImageName(file: File): string {
+  const now = new Date()
+  const timestamp = [
+    now.getFullYear(),
+    String(now.getMonth() + 1).padStart(2, '0'),
+    String(now.getDate()).padStart(2, '0'),
+    String(now.getHours()).padStart(2, '0'),
+    String(now.getMinutes()).padStart(2, '0'),
+    String(now.getSeconds()).padStart(2, '0'),
+  ].join('-')
+  const ext = file.type.startsWith('image/')
+    ? file.type.slice('image/'.length).replace(/[^a-z0-9]+/gi, '') || 'png'
+    : 'png'
+  return `pasted-image-${timestamp}.${ext}`
+}
+
+function ensureFileName(file: File): File {
+  if (file.name.trim()) return file
+  return new File([file], createPastedImageName(file), {
+    type: file.type || 'image/png',
+    lastModified: Date.now(),
+  })
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        resolve(reader.result)
+        return
+      }
+      reject(new Error('Image read returned an unsupported result'))
+    }
+    reader.onerror = () => {
+      reject(reader.error ?? new Error('Image read failed'))
+    }
+    reader.readAsDataURL(file)
+  })
+}
+
+async function attachImageFile(file: File, sessionToken: number): Promise<void> {
+  if (!beginAttachmentWork(sessionToken)) return
+  try {
+    const normalizedFile = ensureFileName(file)
+    const dataUrl = await readFileAsDataUrl(normalizedFile)
+    if (sessionToken !== attachmentSessionToken) return
+    selectedImages.value = [
+      ...selectedImages.value,
+      {
+        id: createAttachmentId(),
+        name: normalizedFile.name,
+        url: dataUrl,
+      },
+    ]
+    recordAttachmentBatchResult('success')
+  } catch {
+    if (sessionToken === attachmentSessionToken) {
+      recordAttachmentBatchResult('failure')
+    }
+  } finally {
+    finishAttachmentWork(sessionToken)
+  }
+}
+
+async function attachUploadedFile(file: File, sessionToken: number): Promise<void> {
+  if (!beginAttachmentWork(sessionToken)) return
+  try {
+    const serverPath = await uploadFile(file)
+    if (sessionToken !== attachmentSessionToken) return
+    if (!serverPath) {
+      recordAttachmentBatchResult('failure')
+      return
+    }
+    addFileAttachment(serverPath)
+    recordAttachmentBatchResult('success')
+  } catch {
+    if (sessionToken === attachmentSessionToken) {
+      recordAttachmentBatchResult('failure')
+    }
+  } finally {
+    finishAttachmentWork(sessionToken)
+  }
+}
+
+function attachIncomingFiles(files: FileList | File[] | null | undefined): void {
+  const normalizedFiles = normalizeSelectedFiles(files)
+  if (normalizedFiles.length === 0) return
+  beginAttachmentBatch(normalizedFiles.length)
+  isAttachMenuOpen.value = false
+  isSlashMenuOpen.value = false
+  closeFileMention()
+  const sessionToken = attachmentSessionToken
+  for (const file of normalizedFiles) {
+    if (isImageFile(file)) {
+      void attachImageFile(file, sessionToken)
+    } else {
+      void attachUploadedFile(file, sessionToken)
+    }
+  }
 }
 
 function addFiles(files: FileList | null): void {
@@ -1196,23 +1646,14 @@ watch(
   },
 )
 
-watch(
-  () => props.prependDraftRequest?.id,
-  () => {
-    const text = props.prependDraftRequest?.text?.trim() ?? ''
-    if (!text) return
-    draft.value = draft.value ? `${text}\n${draft.value}` : text
-    onInputChange()
-    nextTick(() => inputRef.value?.focus())
-  },
-)
+
 </script>
 
 <style scoped>
 @reference "tailwindcss";
 
 .thread-composer {
-  @apply w-full max-w-175 mx-auto px-2 sm:px-6;
+  @apply w-full max-w-[min(var(--chat-column-max,72rem),100%)] mx-auto;
 }
 
 .thread-composer-shell {
@@ -1299,6 +1740,45 @@ watch(
   @apply ml-0.5 inline-flex h-3.5 w-3.5 items-center justify-center rounded-full border-0 bg-transparent text-emerald-500 transition hover:bg-emerald-200 hover:text-emerald-700 text-xs leading-none p-0;
 }
 
+.thread-composer-rate-limit {
+  @apply mb-1.5 px-1 text-[11px] leading-5 text-zinc-500;
+}
+
+.thread-composer-rate-limit-row {
+  @apply flex min-w-0 items-center gap-x-1.5 gap-y-1;
+}
+
+.thread-composer-rate-limit-value {
+  @apply min-w-0 flex-1 truncate;
+}
+
+.thread-composer-context-usage-inline {
+  --context-usage-accent: rgb(34 197 94);
+  @apply ml-auto inline-flex min-w-0 max-w-[56%] items-center gap-2 text-right;
+}
+
+.thread-composer-context-usage-inline.is-warning {
+  --context-usage-accent: rgb(245 158 11);
+}
+
+.thread-composer-context-usage-inline.is-danger {
+  --context-usage-accent: rgb(239 68 68);
+}
+
+.thread-composer-context-usage-inline-value {
+  @apply min-w-0 truncate font-medium tabular-nums;
+  color: var(--context-usage-accent);
+}
+
+.thread-composer-context-usage-inline-bar {
+  @apply block h-1.5 w-14 shrink-0 overflow-hidden rounded-full bg-zinc-200/80;
+}
+
+.thread-composer-context-usage-inline-bar-fill {
+  @apply block h-full rounded-full transition-[width] duration-200 ease-out;
+  background: var(--context-usage-accent);
+}
+
 .thread-composer-input-wrap {
   @apply relative;
 }
@@ -1357,7 +1837,6 @@ watch(
 
 .thread-composer-input {
   @apply w-full min-w-0 min-h-10 sm:min-h-11 max-h-40 rounded-xl border-0 bg-transparent px-1 py-2 text-sm text-zinc-900 outline-none transition resize-none overflow-y-auto;
-  overscroll-behavior-y: contain;
 }
 
 .thread-composer-input:focus {
@@ -1464,6 +1943,7 @@ watch(
 .thread-composer-control :deep(.composer-dropdown-value) {
   @apply truncate;
 }
+
 
 .thread-composer-actions {
   @apply ml-auto flex min-w-0 items-center gap-2;

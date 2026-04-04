@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { mkdtemp, readFile, readdir, rm, mkdir, stat, cp, lstat, readlink, symlink } from 'node:fs/promises'
-import { createReadStream, existsSync } from 'node:fs'
+import { createReadStream } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
@@ -10,6 +10,8 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { createInterface } from 'node:readline'
 import { writeFile } from 'node:fs/promises'
+import { handleAccountRoutes } from './accountRoutes.js'
+import { handleReviewRoutes } from './reviewGit.js'
 import { handleSkillsRoutes, initializeSkillsSyncOnStartup } from './skillsRoutes.js'
 import { TelegramThreadBridge } from './telegramThreadBridge.js'
 import { getSpawnInvocation } from '../utils/commandInvocation.js'
@@ -83,10 +85,53 @@ type GithubTrendingItem = {
   stars: number
 }
 
+type ProviderModelsResponse = {
+  data: string[]
+  providerId: string
+  source: 'provider'
+}
+
+const PROVIDER_MODELS_FETCH_TIMEOUT_MS = 5_000
+
+const THREAD_RESPONSE_TURN_LIMIT = 10
+const THREAD_METHODS_WITH_TURNS = new Set(['thread/read', 'thread/resume', 'thread/fork', 'thread/rollback'])
+
+type SessionRecoveredFileChange = {
+  path: string
+  operation: 'add' | 'delete' | 'update'
+  movedToPath: string | null
+  diff: string
+  addedLineCount: number
+  removedLineCount: number
+}
+
+type SessionRecoveredTurnFileChanges = {
+  turnId: string
+  turnIndex: number
+  fileChanges: SessionRecoveredFileChange[]
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null
+}
+
+function trimThreadTurnsInRpcResult(method: string, result: unknown): unknown {
+  if (!THREAD_METHODS_WITH_TURNS.has(method)) return result
+
+  const record = asRecord(result)
+  const thread = asRecord(record?.thread)
+  const turns = Array.isArray(thread?.turns) ? thread.turns : null
+  if (!record || !thread || !turns || turns.length <= THREAD_RESPONSE_TURN_LIMIT) return result
+
+  return {
+    ...record,
+    thread: {
+      ...thread,
+      turns: turns.slice(-THREAD_RESPONSE_TURN_LIMIT),
+    },
+  }
 }
 
 function getErrorMessage(payload: unknown, fallback: string): string {
@@ -112,6 +157,179 @@ function setJson(res: ServerResponse, statusCode: number, payload: unknown): voi
   res.statusCode = statusCode
   res.setHeader('Content-Type', 'application/json; charset=utf-8')
   res.end(JSON.stringify(payload))
+}
+
+function logProviderModelDiscoveryWarning(message: string, details: Record<string, unknown>): void {
+  console.warn('[codex-provider-models]', message, details)
+}
+
+function isTimeoutError(payload: unknown): boolean {
+  return payload instanceof Error && (payload.name === 'AbortError' || payload.name === 'TimeoutError')
+}
+
+function normalizeHeaderValue(value: unknown): string | null {
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    return trimmed.length > 0 ? trimmed : null
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value)
+  }
+  return null
+}
+
+function normalizeQueryParams(value: unknown): URLSearchParams {
+  const params = new URLSearchParams()
+  const record = asRecord(value)
+  if (!record) return params
+
+  for (const [key, rawValue] of Object.entries(record)) {
+    const normalized = normalizeHeaderValue(rawValue)
+    if (!normalized) continue
+    params.set(key, normalized)
+  }
+
+  return params
+}
+
+function buildProviderModelsUrl(baseUrl: string, queryParams: unknown): URL {
+  const url = new URL(baseUrl)
+  url.pathname = url.pathname.endsWith('/') ? `${url.pathname}models` : `${url.pathname}/models`
+  const extraParams = normalizeQueryParams(queryParams)
+  for (const [key, value] of extraParams.entries()) {
+    url.searchParams.set(key, value)
+  }
+  return url
+}
+
+function normalizeProviderModelsData(payload: unknown): string[] {
+  const record = asRecord(payload)
+  const rows = Array.isArray(record?.data) ? record.data : null
+  if (!rows) {
+    throw new Error('provider /models payload is missing a data array')
+  }
+
+  const ids: string[] = []
+  for (const row of rows) {
+    const entry = asRecord(row)
+    const candidate = readNonEmptyString(entry?.id)
+    if (!candidate || ids.includes(candidate)) continue
+    ids.push(candidate)
+  }
+  return ids
+}
+
+async function readProviderBackedModelIds(appServer: AppServerProcess): Promise<ProviderModelsResponse> {
+  const configPayload = asRecord(await appServer.rpc('config/read', {}))
+  const config = asRecord(configPayload?.config)
+  const providerId = readNonEmptyString(config?.model_provider)
+  if (!providerId) {
+    return { data: [], providerId: '', source: 'provider' }
+  }
+
+  const providers = asRecord(config?.model_providers)
+  const provider = asRecord(providers?.[providerId])
+  if (!provider) {
+    logProviderModelDiscoveryWarning('configured provider is missing from model_providers', { providerId })
+    return { data: [], providerId, source: 'provider' }
+  }
+
+  const wireApi = readNonEmptyString(provider.wire_api)
+  if (wireApi !== 'responses') {
+    return { data: [], providerId, source: 'provider' }
+  }
+
+  const baseUrl = readNonEmptyString(provider.base_url)
+  if (!baseUrl) {
+    logProviderModelDiscoveryWarning('responses provider is missing base_url', { providerId })
+    return { data: [], providerId, source: 'provider' }
+  }
+
+  const headers = new Headers()
+  const configuredHeaders = asRecord(provider.http_headers)
+  if (configuredHeaders) {
+    for (const [key, rawValue] of Object.entries(configuredHeaders)) {
+      const normalized = normalizeHeaderValue(rawValue)
+      if (!normalized) continue
+      headers.set(key, normalized)
+    }
+  }
+
+  const bearerToken = readNonEmptyString(provider.experimental_bearer_token)
+  if (bearerToken && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${bearerToken}`)
+  }
+
+  const envKey = readNonEmptyString(provider.env_key)
+  const envHttpHeaders = asRecord(provider.env_http_headers)
+  if (envKey || envHttpHeaders) {
+    logProviderModelDiscoveryWarning('provider discovery skipped env-backed auth/header expansion', {
+      providerId,
+      hasEnvKey: Boolean(envKey),
+      hasEnvHttpHeaders: Boolean(envHttpHeaders),
+    })
+  }
+
+  let requestUrl: URL
+  try {
+    requestUrl = buildProviderModelsUrl(baseUrl, provider.query_params)
+  } catch (error) {
+    logProviderModelDiscoveryWarning('provider /models URL was invalid', {
+      providerId,
+      error: getErrorMessage(error, 'invalid url'),
+    })
+    return { data: [], providerId, source: 'provider' }
+  }
+
+  let response: Response
+  try {
+    response = await fetch(requestUrl, {
+      method: 'GET',
+      headers,
+      signal: AbortSignal.timeout(PROVIDER_MODELS_FETCH_TIMEOUT_MS),
+    })
+  } catch (error) {
+    logProviderModelDiscoveryWarning('provider /models request failed', {
+      providerId,
+      error: isTimeoutError(error) ? `request timed out after ${PROVIDER_MODELS_FETCH_TIMEOUT_MS}ms` : getErrorMessage(error, 'network error'),
+    })
+    return { data: [], providerId, source: 'provider' }
+  }
+
+  let payload: unknown = null
+  try {
+    payload = await response.json()
+  } catch (error) {
+    logProviderModelDiscoveryWarning('provider /models response was not valid JSON', {
+      providerId,
+      status: response.status,
+      error: getErrorMessage(error, 'invalid json'),
+    })
+    return { data: [], providerId, source: 'provider' }
+  }
+
+  if (!response.ok) {
+    logProviderModelDiscoveryWarning('provider /models request returned non-2xx', {
+      providerId,
+      status: response.status,
+      statusText: response.statusText,
+    })
+    return { data: [], providerId, source: 'provider' }
+  }
+
+  try {
+    return {
+      data: normalizeProviderModelsData(payload),
+      providerId,
+      source: 'provider',
+    }
+  } catch (error) {
+    logProviderModelDiscoveryWarning('provider /models payload was invalid', {
+      providerId,
+      error: getErrorMessage(error, 'invalid payload'),
+    })
+    return { data: [], providerId, source: 'provider' }
+  }
 }
 
 function extractThreadMessageText(threadReadPayload: unknown): string {
@@ -150,6 +368,229 @@ function extractThreadMessageText(threadReadPayload: unknown): string {
   }
 
   return parts.join('\n').trim()
+}
+
+function readNonEmptyString(value: unknown): string {
+  return typeof value === 'string' && value.trim().length > 0 ? value : ''
+}
+
+function countRecoveredContentLines(value: string): number {
+  if (!value) return 0
+  const normalized = value.replace(/\r\n/g, '\n')
+  const trimmed = normalized.endsWith('\n') ? normalized.slice(0, -1) : normalized
+  if (!trimmed) return 0
+  return trimmed.split('\n').length
+}
+
+function countRecoveredPatchLines(value: string): { addedLineCount: number; removedLineCount: number } {
+  let addedLineCount = 0
+  let removedLineCount = 0
+
+  for (const line of value.replace(/\r\n/g, '\n').split('\n')) {
+    if (!line) continue
+    if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('@@')) continue
+    if (line.startsWith('+')) {
+      addedLineCount += 1
+      continue
+    }
+    if (line.startsWith('-')) {
+      removedLineCount += 1
+    }
+  }
+
+  return { addedLineCount, removedLineCount }
+}
+
+function mergeRecoveredDiff(first: string, second: string): string {
+  if (!first) return second
+  if (!second || first === second) return first
+  return `${first}\n${second}`.trim()
+}
+
+function mergeRecoveredFileChange(first: SessionRecoveredFileChange, second: SessionRecoveredFileChange): SessionRecoveredFileChange {
+  const operation = first.operation === 'add' || second.operation === 'add'
+    ? 'add'
+    : first.operation === 'delete' || second.operation === 'delete'
+      ? 'delete'
+      : 'update'
+
+  return {
+    path: second.path || first.path,
+    operation,
+    movedToPath: second.movedToPath ?? first.movedToPath ?? null,
+    diff: mergeRecoveredDiff(first.diff, second.diff),
+    addedLineCount: first.addedLineCount + second.addedLineCount,
+    removedLineCount: first.removedLineCount + second.removedLineCount,
+  }
+}
+
+function isApplyPatchSectionBoundary(value: string): boolean {
+  return value.startsWith('*** Update File: ')
+    || value.startsWith('*** Add File: ')
+    || value.startsWith('*** Delete File: ')
+    || value === '*** End Patch'
+}
+
+function parseApplyPatchInput(input: string): SessionRecoveredFileChange[] {
+  const normalized = input.replace(/\r\n/g, '\n')
+  const lines = normalized.split('\n')
+  const changes: SessionRecoveredFileChange[] = []
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? ''
+
+    if (line.startsWith('*** Add File: ')) {
+      const path = line.slice('*** Add File: '.length).trim()
+      const contentLines: string[] = []
+      for (index += 1; index < lines.length; index += 1) {
+        const nextLine = lines[index] ?? ''
+        if (isApplyPatchSectionBoundary(nextLine)) {
+          index -= 1
+          break
+        }
+        contentLines.push(nextLine.startsWith('+') ? nextLine.slice(1) : nextLine)
+      }
+      const diff = contentLines.join('\n').trimEnd()
+      if (path) {
+        changes.push({
+          path,
+          operation: 'add',
+          movedToPath: null,
+          diff,
+          addedLineCount: countRecoveredContentLines(diff),
+          removedLineCount: 0,
+        })
+      }
+      continue
+    }
+
+    if (line.startsWith('*** Delete File: ')) {
+      const path = line.slice('*** Delete File: '.length).trim()
+      if (path) {
+        changes.push({
+          path,
+          operation: 'delete',
+          movedToPath: null,
+          diff: '',
+          addedLineCount: 0,
+          removedLineCount: 0,
+        })
+      }
+      continue
+    }
+
+    if (line.startsWith('*** Update File: ')) {
+      const path = line.slice('*** Update File: '.length).trim()
+      let movedToPath: string | null = null
+      const diffLines: string[] = []
+
+      for (index += 1; index < lines.length; index += 1) {
+        const nextLine = lines[index] ?? ''
+        if (nextLine.startsWith('*** Move to: ')) {
+          const moved = nextLine.slice('*** Move to: '.length).trim()
+          movedToPath = moved || null
+          continue
+        }
+        if (isApplyPatchSectionBoundary(nextLine)) {
+          index -= 1
+          break
+        }
+        diffLines.push(nextLine)
+      }
+
+      const diff = diffLines.join('\n').trimEnd()
+      const counts = countRecoveredPatchLines(diff)
+      if (path) {
+        changes.push({
+          path,
+          operation: 'update',
+          movedToPath,
+          diff,
+          ...counts,
+        })
+      }
+    }
+  }
+
+  return changes
+}
+
+function buildSessionFileChangeFallback(threadReadPayload: unknown, sessionLogRaw: string): SessionRecoveredTurnFileChanges[] {
+  const payload = asRecord(threadReadPayload)
+  const thread = asRecord(payload?.thread)
+  const turns = Array.isArray(thread?.turns) ? thread.turns : []
+  const turnIndexById = new Map<string, number>()
+
+  for (let turnIndex = 0; turnIndex < turns.length; turnIndex += 1) {
+    const turnRecord = asRecord(turns[turnIndex])
+    const turnId = readNonEmptyString(turnRecord?.id)
+    if (turnId) {
+      turnIndexById.set(turnId, turnIndex)
+    }
+  }
+
+  const collectedByTurnId = new Map<string, SessionRecoveredFileChange[]>()
+  let currentTurnId = ''
+
+  for (const line of sessionLogRaw.split('\n')) {
+    if (!line.trim()) continue
+    let row: Record<string, unknown> | null = null
+    try {
+      row = JSON.parse(line) as Record<string, unknown>
+    } catch {
+      continue
+    }
+
+    if (row.type === 'turn_context') {
+      const payloadRecord = asRecord(row.payload)
+      currentTurnId = readNonEmptyString(payloadRecord?.turn_id) || currentTurnId
+      continue
+    }
+
+    if (row.type !== 'response_item' || !currentTurnId || !turnIndexById.has(currentTurnId)) {
+      continue
+    }
+
+    const payloadRecord = asRecord(row.payload)
+    if (
+      payloadRecord?.type !== 'custom_tool_call'
+      || payloadRecord.name !== 'apply_patch'
+      || payloadRecord.status !== 'completed'
+    ) {
+      continue
+    }
+
+    const input = readNonEmptyString(payloadRecord.input)
+    if (!input) continue
+
+    const parsedChanges = parseApplyPatchInput(input)
+    if (parsedChanges.length === 0) continue
+
+    const previous = collectedByTurnId.get(currentTurnId) ?? []
+    previous.push(...parsedChanges)
+    collectedByTurnId.set(currentTurnId, previous)
+  }
+
+  const recovered: SessionRecoveredTurnFileChanges[] = []
+  for (const [turnId, fileChanges] of collectedByTurnId.entries()) {
+    const turnIndex = turnIndexById.get(turnId)
+    if (typeof turnIndex !== 'number' || fileChanges.length === 0) continue
+
+    const mergedByPath = new Map<string, SessionRecoveredFileChange>()
+    for (const fileChange of fileChanges) {
+      const key = `${fileChange.path}\u0000${fileChange.movedToPath ?? ''}`
+      const previous = mergedByPath.get(key)
+      mergedByPath.set(key, previous ? mergeRecoveredFileChange(previous, fileChange) : { ...fileChange })
+    }
+
+    recovered.push({
+      turnId,
+      turnIndex,
+      fileChanges: Array.from(mergedByPath.values()),
+    })
+  }
+
+  return recovered.sort((first, second) => first.turnIndex - second.turnIndex)
 }
 
 function isExactPhraseMatch(query: string, doc: ThreadSearchDocument): boolean {
@@ -403,98 +844,7 @@ function normalizeStringRecord(value: unknown): Record<string, string> {
   return next
 }
 
-function normalizeCommitMessage(value: unknown): string {
-  if (typeof value !== 'string') return ''
-  const normalized = value
-    .replace(/\r\n?/gu, '\n')
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-    .join('\n')
-    .trim()
-  return normalized.slice(0, 2000)
-}
 
-function getRollbackGitDirForCwd(cwd: string): string {
-  return join(cwd, '.codex', 'rollbacks', '.git')
-}
-
-async function ensureLocalCodexGitignoreHasRollbacks(cwd: string): Promise<void> {
-  const localCodexDir = join(cwd, '.codex')
-  const gitignorePath = join(localCodexDir, '.gitignore')
-  await mkdir(localCodexDir, { recursive: true })
-  let current = ''
-  try {
-    current = await readFile(gitignorePath, 'utf8')
-  } catch {
-    current = ''
-  }
-  const rows = current.split(/\r?\n/).map((line) => line.trim())
-  if (rows.includes('rollbacks/')) return
-  const prefix = current.length > 0 && !current.endsWith('\n') ? `${current}\n` : current
-  await writeFile(gitignorePath, `${prefix}rollbacks/\n`, 'utf8')
-}
-
-async function ensureRollbackGitRepo(cwd: string): Promise<string> {
-  const gitDir = getRollbackGitDirForCwd(cwd)
-  try {
-    const headInfo = await stat(join(gitDir, 'HEAD'))
-    if (!headInfo.isFile()) {
-      throw new Error('Invalid rollback git repository')
-    }
-  } catch {
-    await mkdir(dirname(gitDir), { recursive: true })
-  await runCommand('git', ['--git-dir', gitDir, '--work-tree', cwd, 'init'])
-  }
-  await runCommand('git', ['--git-dir', gitDir, 'config', 'user.email', 'codex@local'])
-  await runCommand('git', ['--git-dir', gitDir, 'config', 'user.name', 'Codex Rollback'])
-  try {
-    await runCommandCapture('git', ['--git-dir', gitDir, '--work-tree', cwd, 'rev-parse', '--verify', 'HEAD'])
-  } catch {
-    await runCommand(
-      'git',
-      ['--git-dir', gitDir, '--work-tree', cwd, 'commit', '--allow-empty', '-m', 'Initialize rollback history'],
-    )
-  }
-  await ensureLocalCodexGitignoreHasRollbacks(cwd)
-  return gitDir
-}
-
-async function runRollbackGit(cwd: string, args: string[]): Promise<void> {
-  const gitDir = await ensureRollbackGitRepo(cwd)
-  await runCommand('git', ['--git-dir', gitDir, '--work-tree', cwd, ...args])
-}
-
-async function runRollbackGitCapture(cwd: string, args: string[]): Promise<string> {
-  const gitDir = await ensureRollbackGitRepo(cwd)
-  return await runCommandCapture('git', ['--git-dir', gitDir, '--work-tree', cwd, ...args])
-}
-
-async function runRollbackGitWithOutput(cwd: string, args: string[]): Promise<string> {
-  const gitDir = await ensureRollbackGitRepo(cwd)
-  return await runCommandWithOutput('git', ['--git-dir', gitDir, '--work-tree', cwd, ...args])
-}
-
-async function hasRollbackGitWorkingTreeChanges(cwd: string): Promise<boolean> {
-  const status = await runRollbackGitWithOutput(cwd, ['status', '--porcelain'])
-  return status.trim().length > 0
-}
-
-async function findRollbackCommitByExactMessage(cwd: string, message: string): Promise<string> {
-  const normalizedTarget = normalizeCommitMessage(message)
-  if (!normalizedTarget) return ''
-  const raw = await runRollbackGitWithOutput(cwd, ['log', '--format=%H%x1f%B%x1e'])
-  const entries = raw.split('\x1e')
-  for (const entry of entries) {
-    if (!entry.trim()) continue
-    const [shaRaw, bodyRaw] = entry.split('\x1f')
-    const sha = (shaRaw ?? '').trim()
-    const body = normalizeCommitMessage(bodyRaw ?? '')
-    if (!sha) continue
-    if (body === normalizedTarget) return sha
-  }
-  return ''
-}
 
 function getCodexAuthPath(): string {
   return join(getCodexHomeDir(), 'auth.json')
@@ -1048,6 +1398,10 @@ class AppServerProcess {
     })
 
     proc.on('exit', () => {
+      if (this.process !== proc) {
+        return
+      }
+
       const failure = new Error(this.stopping ? 'codex app-server stopped' : 'codex app-server exited unexpectedly')
       for (const request of this.pending.values()) {
         request.reject(failure)
@@ -1197,7 +1551,14 @@ class AppServerProcess {
         name: 'codex-web-local',
         version: '0.1.0',
       },
+      capabilities: {
+        experimentalApi: true,
+      },
     }).then(() => {
+      this.sendLine({
+        jsonrpc: '2.0',
+        method: 'initialized',
+      })
       this.initialized = true
     }).finally(() => {
       this.initializePromise = null
@@ -1415,12 +1776,14 @@ type CodexBridgeMiddleware = ((req: IncomingMessage, res: ServerResponse, next: 
 }
 
 type SharedBridgeState = {
+  version: string
   appServer: AppServerProcess
   methodCatalog: MethodCatalog
   telegramBridge: TelegramThreadBridge
 }
 
 const SHARED_BRIDGE_KEY = '__codexRemoteSharedBridge__'
+const SHARED_BRIDGE_VERSION = 'experimental-api-v2'
 
 function getSharedBridgeState(): SharedBridgeState {
   const globalScope = globalThis as typeof globalThis & {
@@ -1428,10 +1791,16 @@ function getSharedBridgeState(): SharedBridgeState {
   }
 
   const existing = globalScope[SHARED_BRIDGE_KEY]
-  if (existing) return existing
+  if (existing) {
+    if (existing.version === SHARED_BRIDGE_VERSION) {
+      return existing
+    }
+    existing.appServer.dispose()
+  }
 
   const appServer = new AppServerProcess()
   const created: SharedBridgeState = {
+    version: SHARED_BRIDGE_VERSION,
     appServer,
     methodCatalog: new MethodCatalog(),
     telegramBridge: new TelegramThreadBridge(appServer, {
@@ -1548,7 +1917,15 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
 
       const url = new URL(req.url, 'http://localhost')
 
+      if (await handleAccountRoutes(req, res, url, { appServer })) {
+        return
+      }
+
       if (await handleSkillsRoutes(req, res, url, { appServer, readJsonBody })) {
+        return
+      }
+
+      if (await handleReviewRoutes(req, res, url, { readJsonBody })) {
         return
       }
 
@@ -1566,8 +1943,37 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           return
         }
 
-        const result = await appServer.rpc(body.method, body.params ?? null)
+        const rpcResult = await appServer.rpc(body.method, body.params ?? null)
+        const result = trimThreadTurnsInRpcResult(body.method, rpcResult)
         setJson(res, 200, { result })
+        return
+      }
+
+      if (req.method === 'GET' && url.pathname === '/codex-api/thread-file-change-fallback') {
+        const threadId = url.searchParams.get('threadId')?.trim() ?? ''
+        if (!threadId) {
+          setJson(res, 400, { error: 'Missing threadId' })
+          return
+        }
+
+        const threadReadResult = await appServer.rpc('thread/read', {
+          threadId,
+          includeTurns: true,
+        })
+        const threadReadRecord = asRecord(threadReadResult)
+        const threadRecord = asRecord(threadReadRecord?.thread)
+        const sessionPath = readNonEmptyString(threadRecord?.path)
+        if (!sessionPath || !isAbsolute(sessionPath)) {
+          setJson(res, 200, { data: [] })
+          return
+        }
+
+        try {
+          const sessionLogRaw = await readFile(sessionPath, 'utf8')
+          setJson(res, 200, { data: buildSessionFileChangeFallback(threadReadResult, sessionLogRaw) })
+        } catch {
+          setJson(res, 200, { data: [] })
+        }
         return
       }
 
@@ -1609,6 +2015,12 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
       if (req.method === 'GET' && url.pathname === '/codex-api/meta/notifications') {
         const methods = await methodCatalog.listNotificationMethods()
         setJson(res, 200, { data: methods })
+        return
+      }
+
+      if (req.method === 'GET' && url.pathname === '/codex-api/provider-models') {
+        const data = await readProviderBackedModelIds(appServer)
+        setJson(res, 200, data)
         return
       }
 
@@ -1716,108 +2128,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         return
       }
 
-      if (req.method === 'POST' && url.pathname === '/codex-api/worktree/auto-commit') {
-        const payload = asRecord(await readJsonBody(req))
-        const rawCwd = typeof payload?.cwd === 'string' ? payload.cwd.trim() : ''
-        const commitMessage = normalizeCommitMessage(payload?.message)
-        if (!rawCwd) {
-          setJson(res, 400, { error: 'Missing cwd' })
-          return
-        }
-        if (!commitMessage) {
-          setJson(res, 400, { error: 'Missing message' })
-          return
-        }
 
-        const cwd = isAbsolute(rawCwd) ? rawCwd : resolve(rawCwd)
-        try {
-          const cwdInfo = await stat(cwd)
-          if (!cwdInfo.isDirectory()) {
-            setJson(res, 400, { error: 'cwd is not a directory' })
-            return
-          }
-        } catch {
-          setJson(res, 404, { error: 'cwd does not exist' })
-          return
-        }
-
-        try {
-          await ensureRollbackGitRepo(cwd)
-          const beforeStatus = await runRollbackGitWithOutput(cwd, ['status', '--porcelain'])
-          if (!beforeStatus.trim()) {
-            setJson(res, 200, { data: { committed: false } })
-            return
-          }
-
-          await runRollbackGit(cwd, ['add', '-A'])
-          const stagedStatus = await runRollbackGitWithOutput(cwd, ['diff', '--cached', '--name-only'])
-          if (!stagedStatus.trim()) {
-            setJson(res, 200, { data: { committed: false } })
-            return
-          }
-
-          await runRollbackGit(cwd, ['commit', '-m', commitMessage])
-          setJson(res, 200, { data: { committed: true } })
-        } catch (error) {
-          setJson(res, 500, { error: getErrorMessage(error, 'Failed to auto-commit rollback changes') })
-        }
-        return
-      }
-
-      if (req.method === 'POST' && url.pathname === '/codex-api/worktree/rollback-to-message') {
-        const payload = asRecord(await readJsonBody(req))
-        const rawCwd = typeof payload?.cwd === 'string' ? payload.cwd.trim() : ''
-        const commitMessage = normalizeCommitMessage(payload?.message)
-        if (!rawCwd) {
-          setJson(res, 400, { error: 'Missing cwd' })
-          return
-        }
-        if (!commitMessage) {
-          setJson(res, 400, { error: 'Missing message' })
-          return
-        }
-
-        const cwd = isAbsolute(rawCwd) ? rawCwd : resolve(rawCwd)
-        try {
-          const cwdInfo = await stat(cwd)
-          if (!cwdInfo.isDirectory()) {
-            setJson(res, 400, { error: 'cwd is not a directory' })
-            return
-          }
-        } catch {
-          setJson(res, 404, { error: 'cwd does not exist' })
-          return
-        }
-
-        try {
-          await ensureRollbackGitRepo(cwd)
-          const commitSha = await findRollbackCommitByExactMessage(cwd, commitMessage)
-          if (!commitSha) {
-            setJson(res, 404, { error: 'No matching commit found for this user message' })
-            return
-          }
-          let resetTargetSha = ''
-          try {
-            resetTargetSha = await runRollbackGitCapture(cwd, ['rev-parse', `${commitSha}^`])
-          } catch {
-            setJson(res, 409, { error: 'Cannot rollback: matched commit has no parent commit' })
-            return
-          }
-
-          let stashed = false
-          if (await hasRollbackGitWorkingTreeChanges(cwd)) {
-            const stashMessage = `codex-auto-stash-before-rollback-${Date.now()}`
-            await runRollbackGit(cwd, ['stash', 'push', '-u', '-m', stashMessage])
-            stashed = true
-          }
-
-          await runRollbackGit(cwd, ['reset', '--hard', resetTargetSha])
-          setJson(res, 200, { data: { reset: true, commitSha, resetTargetSha, stashed } })
-        } catch (error) {
-          setJson(res, 500, { error: getErrorMessage(error, 'Failed to rollback project to user message commit') })
-        }
-        return
-      }
 
       if (req.method === 'PUT' && url.pathname === '/codex-api/workspace-roots-state') {
         const payload = await readJsonBody(req)
@@ -1877,6 +2188,29 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           labels: nextLabels,
           active: nextActive,
         })
+        setJson(res, 200, { data: { path: normalizedPath } })
+        return
+      }
+
+      if (req.method === 'POST' && url.pathname === '/codex-api/local-directory') {
+        const payload = asRecord(await readJsonBody(req))
+        const rawPath = typeof payload?.path === 'string' ? payload.path.trim() : ''
+        if (!rawPath) {
+          setJson(res, 400, { error: 'Missing path' })
+          return
+        }
+
+        const normalizedPath = isAbsolute(rawPath) ? rawPath : resolve(rawPath)
+        try {
+          const info = await stat(normalizedPath)
+          if (!info.isDirectory()) {
+            setJson(res, 400, { error: 'Path exists but is not a directory' })
+            return
+          }
+        } catch {
+          await mkdir(normalizedPath, { recursive: true })
+        }
+
         setJson(res, 200, { data: { path: normalizedPath } })
         return
       }

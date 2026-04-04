@@ -8,26 +8,71 @@ import {
   type RpcNotification,
 } from './codexRpcClient'
 import type {
+  CollaborationModeListResponse,
   ConfigReadResponse,
   GetAccountRateLimitsResponse,
   ModelListResponse,
   ReasoningEffort,
   ThreadListResponse,
   ThreadReadResponse,
+  Turn,
 } from './appServerDtos'
 import { normalizeCodexApiError } from './codexErrors'
 import {
+  readActiveTurnIdFromResponse,
   normalizeThreadGroupsV2,
   normalizeThreadMessagesV2,
   readThreadInProgressFromResponse,
 } from './normalizers/v2'
-import type { SpeedMode, UiMessage, UiProjectGroup } from '../types/codex'
+import type {
+  SpeedMode,
+  UiAccountEntry,
+  UiAccountQuotaStatus,
+  UiAccountUnavailableReason,
+  CollaborationModeKind,
+  CollaborationModeOption,
+  UiCreditsSnapshot,
+  UiFileChange,
+  UiMessage,
+  UiProjectGroup,
+  UiReviewAction,
+  UiReviewActionLevel,
+  UiReviewFile,
+  UiReviewFinding,
+  UiReviewHunk,
+  UiReviewLine,
+  UiReviewResult,
+  UiReviewScope,
+  UiReviewSnapshot,
+  UiReviewWorkspaceView,
+  UiRateLimitSnapshot,
+  UiRateLimitWindow,
+} from '../types/codex'
 import { normalizePathForUi } from '../pathUtils.js'
 
 type CurrentModelConfig = {
   model: string
   reasoningEffort: ReasoningEffort | ''
   speedMode: SpeedMode
+}
+
+type ProviderModelsResponse = {
+  data?: unknown
+}
+
+const PROVIDER_MODELS_FETCH_TIMEOUT_MS = 5_000
+
+type ResolvedCollaborationModeSettings = {
+  model: string
+  reasoningEffort: ReasoningEffort | null
+}
+
+function normalizePlanModeReasoningEffort(value: ReasoningEffort | '' | null | undefined): ReasoningEffort | null {
+  return value && value.length > 0 ? value : null
+}
+
+function normalizeCollaborationModeReasoningEffort(value: ReasoningEffort | '' | null | undefined): ReasoningEffort | null {
+  return value && value.length > 0 ? value : null
 }
 
 export type WorkspaceRootsState = {
@@ -40,21 +85,18 @@ export type ComposerFileSuggestion = {
   path: string
 }
 
+const DEFAULT_COLLABORATION_MODE_OPTIONS: CollaborationModeOption[] = [
+  { value: 'default', label: 'Default' },
+  { value: 'plan', label: 'Plan' },
+]
+
 export type WorktreeCreateResult = {
   cwd: string
   branch: string
   gitRoot: string
 }
 
-export type WorktreeAutoCommitResult = {
-  committed: boolean
-}
 
-export type WorktreeRollbackResult = {
-  reset: boolean
-  commitSha: string
-  stashed: boolean
-}
 
 export type ThreadSearchResult = {
   threadIds: string[]
@@ -88,6 +130,17 @@ export type GithubTipsScope =
   | 'trending-weekly'
   | 'trending-monthly'
 
+export type LocalDirectoryEntry = {
+  name: string
+  path: string
+}
+
+export type LocalDirectoryListing = {
+  path: string
+  parentPath: string
+  entries: LocalDirectoryEntry[]
+}
+
 function normalizeGithubProjectDescription(fullName: string, rawDescription: string): string {
   const description = rawDescription.trim()
   if (!description) return ''
@@ -107,11 +160,277 @@ function normalizeGithubProjectDescription(fullName: string, rawDescription: str
     .trim()
 }
 
+export type AccountsListResult = {
+  activeAccountId: string | null
+  accounts: UiAccountEntry[]
+  importedAccountId?: string
+}
+
+type ThreadFileChangeFallbackEntry = {
+  turnId: string
+  turnIndex: number
+  fileChanges: UiFileChange[]
+}
+
+type ThreadTurnIndexById = Record<string, number>
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null
+}
+
+function readString(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+function readNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+function readBoolean(value: unknown): boolean | null {
+  return typeof value === 'boolean' ? value : null
+}
+
+function normalizeAccountUnavailableReason(value: unknown): UiAccountUnavailableReason | null {
+  return value === 'payment_required' ? value : null
+}
+
+function isPaymentRequiredErrorMessage(value: string | null): boolean {
+  if (!value) return false
+  const normalized = value.toLowerCase()
+  return normalized.includes('payment required') || /\b402\b/.test(normalized)
+}
+
+function normalizeRateLimitWindow(value: unknown): UiRateLimitWindow | null {
+  const record = asRecord(value)
+  if (!record) return null
+
+  const usedPercent = readNumber(record.usedPercent ?? record.used_percent)
+  if (usedPercent === null) return null
+
+  const windowValue = readNumber(record.windowDurationMins ?? record.window_minutes)
+  return {
+    usedPercent,
+    windowDurationMins: windowValue,
+    windowMinutes: windowValue,
+    resetsAt: readNumber(record.resetsAt ?? record.resets_at),
+  }
+}
+
+function normalizeCreditsSnapshot(value: unknown): UiCreditsSnapshot | null {
+  const record = asRecord(value)
+  if (!record) return null
+
+  const hasCredits = readBoolean(record.hasCredits ?? record.has_credits)
+  const unlimited = readBoolean(record.unlimited)
+  if (hasCredits === null || unlimited === null) return null
+
+  return {
+    hasCredits,
+    unlimited,
+    balance: readString(record.balance),
+  }
+}
+
+function normalizeRateLimitSnapshot(value: unknown): UiRateLimitSnapshot | null {
+  const record = asRecord(value)
+  if (!record) return null
+
+  const primary = normalizeRateLimitWindow(record.primary)
+  const secondary = normalizeRateLimitWindow(record.secondary)
+  const credits = normalizeCreditsSnapshot(record.credits)
+
+  if (!primary && !secondary && !credits) return null
+
+  return {
+    limitId: readString(record.limitId ?? record.limit_id),
+    limitName: readString(record.limitName ?? record.limit_name),
+    primary,
+    secondary,
+    credits,
+    planType: readString(record.planType ?? record.plan_type),
+  }
+}
+
+function normalizeAccountEntry(value: unknown, activeAccountId: string | null = null): UiAccountEntry | null {
+  const record = asRecord(value)
+  if (!record) return null
+  const accountId = readString(record.accountId)
+  const quotaStatusRaw = readString(record.quotaStatus)
+  const quotaStatus: UiAccountQuotaStatus =
+    quotaStatusRaw === 'loading' || quotaStatusRaw === 'ready' || quotaStatusRaw === 'error' ? quotaStatusRaw : 'idle'
+  if (!accountId) return null
+  return {
+    accountId,
+    authMode: readString(record.authMode),
+    email: readString(record.email),
+    planType: readString(record.planType),
+    lastRefreshedAtIso: readString(record.lastRefreshedAtIso) ?? '',
+    lastActivatedAtIso: readString(record.lastActivatedAtIso),
+    quotaSnapshot: normalizeRateLimitSnapshot(record.quotaSnapshot),
+    quotaUpdatedAtIso: readString(record.quotaUpdatedAtIso),
+    quotaStatus,
+    quotaError: readString(record.quotaError),
+    unavailableReason: normalizeAccountUnavailableReason(record.unavailableReason)
+      ?? (isPaymentRequiredErrorMessage(readString(record.quotaError)) ? 'payment_required' : null),
+    isActive: readBoolean(record.isActive) ?? accountId === activeAccountId,
+  }
+}
+
+export function pickCodexRateLimitSnapshot(payload: unknown): UiRateLimitSnapshot | null {
+  const record = asRecord(payload)
+  if (!record) return null
+
+  const rateLimitsByLimitId = asRecord(record.rateLimitsByLimitId ?? record.rate_limits_by_limit_id)
+  const codexBucket = normalizeRateLimitSnapshot(rateLimitsByLimitId?.codex)
+  if (codexBucket) return codexBucket
+
+  return normalizeRateLimitSnapshot(record.rateLimits ?? record.rate_limits)
+}
+
 async function callRpc<T>(method: string, params?: unknown): Promise<T> {
   try {
     return await rpcCall<T>(method, params)
   } catch (error) {
     throw normalizeCodexApiError(error, `RPC ${method} failed`, method)
+  }
+}
+
+function normalizeFallbackFileChange(value: unknown): UiFileChange | null {
+  const record = asRecord(value)
+  if (!record) return null
+
+  const path = readString(record.path)
+  const operation = readString(record.operation)
+  if (!path || (operation !== 'add' && operation !== 'delete' && operation !== 'update')) {
+    return null
+  }
+
+  return {
+    path,
+    operation,
+    movedToPath: readString(record.movedToPath) ?? null,
+    diff: readString(record.diff) ?? '',
+    addedLineCount: readNumber(record.addedLineCount) ?? 0,
+    removedLineCount: readNumber(record.removedLineCount) ?? 0,
+  }
+}
+
+function normalizeThreadFileChangeFallback(value: unknown): ThreadFileChangeFallbackEntry[] {
+  const payload = asRecord(value)
+  const rows = Array.isArray(payload?.data) ? payload.data : []
+  const normalized: ThreadFileChangeFallbackEntry[] = []
+
+  for (const row of rows) {
+    const record = asRecord(row)
+    if (!record) continue
+
+    const turnId = readString(record.turnId)
+    const turnIndex = readNumber(record.turnIndex)
+    const fileChanges = Array.isArray(record.fileChanges)
+      ? record.fileChanges
+        .map((entry) => normalizeFallbackFileChange(entry))
+        .filter((entry): entry is UiFileChange => entry !== null)
+      : []
+
+    if (!turnId || turnIndex === null || fileChanges.length === 0) continue
+    normalized.push({ turnId, turnIndex, fileChanges })
+  }
+
+  return normalized
+}
+
+function buildTurnIndexByTurnId(payload: ThreadReadResponse): ThreadTurnIndexById {
+  const turns = Array.isArray(payload.thread.turns) ? payload.thread.turns : []
+  const lookup: ThreadTurnIndexById = {}
+
+  for (let turnIndex = 0; turnIndex < turns.length; turnIndex += 1) {
+    const turn = turns[turnIndex]
+    if (typeof turn?.id !== 'string' || turn.id.length === 0) continue
+    lookup[turn.id] = turnIndex
+  }
+
+  return lookup
+}
+
+async function fetchThreadFileChangeFallback(threadId: string): Promise<ThreadFileChangeFallbackEntry[]> {
+  const response = await fetch(`/codex-api/thread-file-change-fallback?threadId=${encodeURIComponent(threadId)}`)
+  if (!response.ok) {
+    throw new Error(`Fallback request failed with ${response.status}`)
+  }
+  return normalizeThreadFileChangeFallback(await response.json())
+}
+
+function mergeRecoveredFileChangeMessages(messages: UiMessage[], fallbackEntries: ThreadFileChangeFallbackEntry[]): UiMessage[] {
+  if (fallbackEntries.length === 0) return messages
+
+  const localTurnIndexByTurnId = new Map<string, number>()
+  const coveredTurnIds = new Set<string>()
+
+  for (const message of messages) {
+    const tid = typeof message.turnId === 'string' && message.turnId.length > 0 ? message.turnId : undefined
+    const tIdx = typeof message.turnIndex === 'number' ? message.turnIndex : undefined
+    if (tid && tIdx !== undefined) localTurnIndexByTurnId.set(tid, tIdx)
+
+    const hasFileData =
+      message.messageType === 'fileChange' ||
+      (Array.isArray(message.fileChanges) && message.fileChanges.length > 0)
+    if (hasFileData && tid) coveredTurnIds.add(tid)
+  }
+
+  const extraMessages = fallbackEntries
+    .filter((entry) => localTurnIndexByTurnId.has(entry.turnId) && !coveredTurnIds.has(entry.turnId))
+    .map<UiMessage>((entry) => ({
+      id: `session-file-change:${entry.turnId}`,
+      role: 'system',
+      text: '',
+      messageType: 'fileChange',
+      fileChangeStatus: 'completed',
+      fileChanges: entry.fileChanges,
+      turnId: entry.turnId,
+      turnIndex: localTurnIndexByTurnId.get(entry.turnId) ?? entry.turnIndex,
+    }))
+
+  if (extraMessages.length === 0) return messages
+
+  const extrasByTurnIndex = new Map<number, UiMessage[]>()
+  for (const message of extraMessages) {
+    const turnIndex = message.turnIndex
+    if (typeof turnIndex !== 'number') continue
+    const current = extrasByTurnIndex.get(turnIndex)
+    if (current) current.push(message)
+    else extrasByTurnIndex.set(turnIndex, [message])
+  }
+
+  const insertedTurnIndices = new Set<number>()
+  const merged: UiMessage[] = []
+
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index]
+    merged.push(message)
+
+    const turnIndex = message.turnIndex
+    if (typeof turnIndex !== 'number' || insertedTurnIndices.has(turnIndex)) continue
+    const nextTurnIndex = messages[index + 1]?.turnIndex
+    if (nextTurnIndex === turnIndex) continue
+
+    const extras = extrasByTurnIndex.get(turnIndex)
+    if (!extras || extras.length === 0) continue
+
+    merged.push(...extras)
+    insertedTurnIndices.add(turnIndex)
+  }
+
+  return merged
+}
+
+async function enrichThreadMessagesWithFallback(threadId: string, messages: UiMessage[]): Promise<UiMessage[]> {
+  try {
+    const fallbackEntries = await fetchThreadFileChangeFallback(threadId)
+    return mergeRecoveredFileChangeMessages(messages, fallbackEntries)
+  } catch {
+    return messages
   }
 }
 
@@ -142,17 +461,27 @@ async function getThreadMessagesV2(threadId: string): Promise<UiMessage[]> {
     threadId,
     includeTurns: true,
   })
-  return normalizeThreadMessagesV2(payload)
+  const normalized = normalizeThreadMessagesV2(payload)
+  return await enrichThreadMessagesWithFallback(threadId, normalized)
 }
 
-async function getThreadDetailV2(threadId: string): Promise<{ messages: UiMessage[]; inProgress: boolean }> {
+async function getThreadDetailV2(threadId: string): Promise<{
+  messages: UiMessage[]
+  inProgress: boolean
+  activeTurnId: string
+  turnIndexByTurnId: ThreadTurnIndexById
+}> {
   const payload = await callRpc<ThreadReadResponse>('thread/read', {
     threadId,
     includeTurns: true,
   })
+  const normalized = normalizeThreadMessagesV2(payload)
+  const messages = await enrichThreadMessagesWithFallback(threadId, normalized)
   return {
-    messages: normalizeThreadMessagesV2(payload),
+    messages,
     inProgress: readThreadInProgressFromResponse(payload),
+    activeTurnId: readActiveTurnIdFromResponse(payload),
+    turnIndexByTurnId: buildTurnIndexByTurnId(payload),
   }
 }
 
@@ -172,11 +501,231 @@ export async function getThreadMessages(threadId: string): Promise<UiMessage[]> 
   }
 }
 
-export async function getThreadDetail(threadId: string): Promise<{ messages: UiMessage[]; inProgress: boolean }> {
+export async function getThreadDetail(threadId: string): Promise<{
+  messages: UiMessage[]
+  inProgress: boolean
+  activeTurnId: string
+  turnIndexByTurnId: ThreadTurnIndexById
+}> {
   try {
     return await getThreadDetailV2(threadId)
   } catch (error) {
     throw normalizeCodexApiError(error, `Failed to load thread ${threadId}`, 'thread/read')
+  }
+}
+
+function normalizeReviewLine(value: unknown): UiReviewLine | null {
+  const record = asRecord(value)
+  if (!record) return null
+
+  const key = readString(record.key)
+  const text = typeof record.text === 'string' ? record.text : ''
+  const kind = readString(record.kind)
+  if (!key || !kind) return null
+  if (kind !== 'meta' && kind !== 'hunk' && kind !== 'add' && kind !== 'remove' && kind !== 'context') {
+    return null
+  }
+
+  return {
+    key,
+    kind,
+    text,
+    oldLine: readNumber(record.oldLine),
+    newLine: readNumber(record.newLine),
+  }
+}
+
+function normalizeReviewHunk(value: unknown): UiReviewHunk | null {
+  const record = asRecord(value)
+  if (!record) return null
+
+  const id = readString(record.id)
+  const header = typeof record.header === 'string' ? record.header : ''
+  const patch = typeof record.patch === 'string' ? record.patch : ''
+  if (!id) return null
+
+  return {
+    id,
+    header,
+    patch,
+    addedLineCount: readNumber(record.addedLineCount) ?? 0,
+    removedLineCount: readNumber(record.removedLineCount) ?? 0,
+    oldStart: readNumber(record.oldStart),
+    oldLineCount: readNumber(record.oldLineCount) ?? 0,
+    newStart: readNumber(record.newStart),
+    newLineCount: readNumber(record.newLineCount) ?? 0,
+    lines: Array.isArray(record.lines)
+      ? record.lines
+        .map((entry) => normalizeReviewLine(entry))
+        .filter((entry): entry is UiReviewLine => entry !== null)
+      : [],
+  }
+}
+
+function normalizeReviewFile(value: unknown): UiReviewFile | null {
+  const record = asRecord(value)
+  if (!record) return null
+
+  const id = readString(record.id)
+  const path = readString(record.path)
+  const absolutePath = readString(record.absolutePath)
+  const operation = readString(record.operation)
+  if (!id || !path || !absolutePath || !operation) return null
+  if (operation !== 'add' && operation !== 'delete' && operation !== 'update' && operation !== 'rename') {
+    return null
+  }
+
+  return {
+    id,
+    path,
+    absolutePath,
+    previousPath: readString(record.previousPath),
+    previousAbsolutePath: readString(record.previousAbsolutePath),
+    operation,
+    addedLineCount: readNumber(record.addedLineCount) ?? 0,
+    removedLineCount: readNumber(record.removedLineCount) ?? 0,
+    diff: typeof record.diff === 'string' ? record.diff : '',
+    hunks: Array.isArray(record.hunks)
+      ? record.hunks
+        .map((entry) => normalizeReviewHunk(entry))
+        .filter((entry): entry is UiReviewHunk => entry !== null)
+      : [],
+  }
+}
+
+function normalizeReviewSnapshot(payload: unknown): UiReviewSnapshot {
+  const envelope = asRecord(payload)
+  const data = asRecord(envelope?.data)
+  const summaryRecord = asRecord(data?.summary)
+  const scope = readString(data?.scope) === 'baseBranch' ? 'baseBranch' : 'workspace'
+  const workspaceView = readString(data?.workspaceView) === 'staged' ? 'staged' : 'unstaged'
+
+  return {
+    cwd: readString(data?.cwd) ?? '',
+    gitRoot: readString(data?.gitRoot),
+    isGitRepo: readBoolean(data?.isGitRepo) ?? false,
+    scope,
+    workspaceView,
+    baseBranch: readString(data?.baseBranch),
+    baseBranchOptions: Array.isArray(data?.baseBranchOptions)
+      ? data.baseBranchOptions
+        .map((entry) => readString(entry))
+        .filter((entry): entry is string => typeof entry === 'string' && entry.length > 0)
+      : [],
+    headBranch: readString(data?.headBranch),
+    mergeBaseSha: readString(data?.mergeBaseSha),
+    generatedAtIso: readString(data?.generatedAtIso) ?? '',
+    summary: {
+      fileCount: readNumber(summaryRecord?.fileCount) ?? 0,
+      addedLineCount: readNumber(summaryRecord?.addedLineCount) ?? 0,
+      removedLineCount: readNumber(summaryRecord?.removedLineCount) ?? 0,
+    },
+    files: Array.isArray(data?.files)
+      ? data.files
+        .map((entry) => normalizeReviewFile(entry))
+        .filter((entry): entry is UiReviewFile => entry !== null)
+      : [],
+  }
+}
+
+function parseReviewLocation(value: string): {
+  absolutePath: string | null
+  startLine: number | null
+  endLine: number | null
+} {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    return { absolutePath: null, startLine: null, endLine: null }
+  }
+
+  const match = trimmed.match(/^(.*?):(\d+)-(\d+)$/u)
+  if (!match) {
+    return { absolutePath: trimmed || null, startLine: null, endLine: null }
+  }
+
+  return {
+    absolutePath: match[1]?.trim() || null,
+    startLine: Number(match[2]),
+    endLine: Number(match[3]),
+  }
+}
+
+function parseReviewText(reviewText: string): UiReviewResult {
+  const normalized = reviewText.replace(/\r\n/g, '\n').trim()
+  if (!normalized) {
+    return { reviewText: '', summary: '', findings: [] }
+  }
+
+  const markerIndex = normalized.search(/\n(?:Full review comments|Review comment):\n/iu)
+  const summary = markerIndex >= 0 ? normalized.slice(0, markerIndex).trim() : normalized
+  const findingsSection = markerIndex >= 0 ? normalized.slice(markerIndex).trim() : ''
+  const findings: UiReviewFinding[] = []
+
+  if (findingsSection) {
+    const body = findingsSection
+      .replace(/^(?:Full review comments|Review comment):\n*/iu, '')
+      .trim()
+    const matches = body.matchAll(/^- (.+?) — (.+)\n?((?:  .*(?:\n|$))*)/gmu)
+    let index = 0
+    for (const match of matches) {
+      const title = match[1]?.trim() ?? ''
+      const location = parseReviewLocation(match[2] ?? '')
+      const block = (match[0] ?? '').trim()
+      const findingBody = (match[3] ?? '')
+        .split('\n')
+        .map((line) => line.replace(/^  /u, ''))
+        .join('\n')
+        .trim()
+
+      findings.push({
+        id: `finding:${index}`,
+        title: title || `Finding ${index + 1}`,
+        body: findingBody,
+        path: location.absolutePath ? location.absolutePath.split('/').filter(Boolean).slice(-1)[0] ?? location.absolutePath : null,
+        absolutePath: location.absolutePath,
+        startLine: location.startLine,
+        endLine: location.endLine,
+        rawText: block,
+      })
+      index += 1
+    }
+  }
+
+  return {
+    reviewText: normalized,
+    summary,
+    findings,
+  }
+}
+
+function readLatestReviewItem(payload: ThreadReadResponse, type: 'enteredReviewMode' | 'exitedReviewMode'): string | null {
+  const turns = Array.isArray(payload.thread.turns) ? payload.thread.turns : []
+  for (let turnIndex = turns.length - 1; turnIndex >= 0; turnIndex -= 1) {
+    const turn = turns[turnIndex]
+    const items = Array.isArray(turn?.items) ? turn.items : []
+    for (let itemIndex = items.length - 1; itemIndex >= 0; itemIndex -= 1) {
+      const item = items[itemIndex]
+      if (item?.type !== type) continue
+      const review = typeof item.review === 'string' ? item.review.trim() : ''
+      if (review) return review
+    }
+  }
+  return null
+}
+
+export async function getThreadReviewResult(threadId: string): Promise<{
+  enteredReviewLabel: string | null
+  result: UiReviewResult | null
+}> {
+  const payload = await callRpc<ThreadReadResponse>('thread/read', {
+    threadId,
+    includeTurns: true,
+  })
+
+  const exitedReview = readLatestReviewItem(payload, 'exitedReviewMode')
+  return {
+    enteredReviewLabel: readLatestReviewItem(payload, 'enteredReviewMode'),
+    result: exitedReview ? parseReviewText(exitedReview) : null,
   }
 }
 
@@ -206,6 +755,83 @@ export async function replyToServerRequest(
 
 export async function getPendingServerRequests(): Promise<unknown[]> {
   return fetchPendingServerRequests()
+}
+
+export async function getAccountRateLimits(): Promise<UiRateLimitSnapshot | null> {
+  try {
+    const payload = await callRpc<unknown>('account/rateLimits/read')
+    return pickCodexRateLimitSnapshot(payload)
+  } catch (error) {
+    throw normalizeCodexApiError(error, 'Failed to load account rate limits', 'account/rateLimits/read')
+  }
+}
+
+function normalizeAccountsListResult(payload: unknown): AccountsListResult {
+  const record = asRecord(payload)
+  const activeAccountId = readString(record?.activeAccountId)
+  const data = Array.isArray(record?.accounts) ? record?.accounts : []
+  return {
+    activeAccountId,
+    importedAccountId: readString(record?.importedAccountId) ?? undefined,
+    accounts: data
+      .map((entry) => normalizeAccountEntry(entry, activeAccountId))
+      .filter((entry): entry is UiAccountEntry => entry !== null),
+  }
+}
+
+export async function getAccounts(): Promise<AccountsListResult> {
+  const response = await fetch('/codex-api/accounts')
+  const payload = (await response.json()) as unknown
+  if (!response.ok) {
+    throw new Error(getErrorMessageFromPayload(payload, 'Failed to load accounts'))
+  }
+  const envelope = asRecord(payload)
+  return normalizeAccountsListResult(envelope?.data)
+}
+
+export async function refreshAccountsFromAuth(): Promise<AccountsListResult> {
+  const response = await fetch('/codex-api/accounts/refresh', {
+    method: 'POST',
+  })
+  const payload = (await response.json()) as unknown
+  if (!response.ok) {
+    throw new Error(getErrorMessageFromPayload(payload, 'Failed to refresh accounts'))
+  }
+  const envelope = asRecord(payload)
+  return normalizeAccountsListResult(envelope?.data)
+}
+
+export async function switchAccount(accountId: string): Promise<UiAccountEntry> {
+  const response = await fetch('/codex-api/accounts/switch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ accountId }),
+  })
+  const payload = (await response.json()) as unknown
+  if (!response.ok) {
+    throw new Error(getErrorMessageFromPayload(payload, 'Failed to switch account'))
+  }
+  const envelope = asRecord(payload)
+  const data = asRecord(envelope?.data)
+  const account = normalizeAccountEntry(data?.account, readString(data?.activeAccountId))
+  if (!account) {
+    throw new Error('Failed to switch account')
+  }
+  return account
+}
+
+export async function removeAccount(accountId: string): Promise<AccountsListResult> {
+  const response = await fetch('/codex-api/accounts/remove', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ accountId }),
+  })
+  const payload = (await response.json()) as unknown
+  if (!response.ok) {
+    throw new Error(getErrorMessageFromPayload(payload, 'Failed to remove account'))
+  }
+  const envelope = asRecord(payload)
+  return normalizeAccountsListResult(envelope?.data)
 }
 
 export async function resumeThread(threadId: string): Promise<void> {
@@ -239,6 +865,20 @@ function normalizeThreadIdFromPayload(payload: unknown): string {
   return ''
 }
 
+function normalizeThreadCwdFromPayload(payload: unknown): string {
+  if (!payload || typeof payload !== 'object') return ''
+  const record = payload as Record<string, unknown>
+
+  const thread = record.thread
+  if (thread && typeof thread === 'object') {
+    const cwd = (thread as Record<string, unknown>).cwd
+    if (typeof cwd === 'string' && cwd.length > 0) {
+      return cwd
+    }
+  }
+  return ''
+}
+
 export async function startThread(cwd?: string, model?: string): Promise<string> {
   try {
     const params: Record<string, unknown> = {}
@@ -259,7 +899,33 @@ export async function startThread(cwd?: string, model?: string): Promise<string>
   }
 }
 
-export async function forkThread(threadId: string, cwd?: string, model?: string): Promise<string> {
+export async function forkThread(threadId: string): Promise<{ threadId: string; cwd: string; messages: UiMessage[] }>
+export async function forkThread(threadId: string, cwd: string | undefined, model: string | undefined): Promise<string>
+export async function forkThread(
+  threadId: string,
+  cwd?: string,
+  model?: string,
+): Promise<string | { threadId: string; cwd: string; messages: UiMessage[] }> {
+  if (arguments.length <= 1) {
+    try {
+      const payload = await callRpc<ThreadReadResponse & { thread?: { id?: string; cwd?: string } }>('thread/fork', {
+        threadId,
+        persistExtendedHistory: true,
+      })
+      const forkedThreadId = normalizeThreadIdFromPayload(payload)
+      if (!forkedThreadId) {
+        throw new Error('thread/fork did not return a thread id')
+      }
+      return {
+        threadId: forkedThreadId,
+        cwd: normalizeThreadCwdFromPayload(payload),
+        messages: normalizeThreadMessagesV2(payload),
+      }
+    } catch (error) {
+      throw normalizeCodexApiError(error, `Failed to fork thread ${threadId}`, 'thread/fork')
+    }
+  }
+
   try {
     const normalizedThreadId = threadId.trim()
     if (!normalizedThreadId) {
@@ -299,6 +965,58 @@ function buildTextWithAttachments(
   return `${prefix}\n## My request for Codex:\n\n${prompt}\n`
 }
 
+async function resolveCollaborationModeSettings(
+  mode: CollaborationModeKind,
+  model?: string,
+  effort?: ReasoningEffort,
+): Promise<ResolvedCollaborationModeSettings> {
+  const explicitModel = model?.trim() ?? ''
+  if (explicitModel) {
+    return {
+      model: explicitModel,
+      reasoningEffort: mode === 'plan'
+        ? normalizePlanModeReasoningEffort(effort)
+        : normalizeCollaborationModeReasoningEffort(effort),
+    }
+  }
+
+  let currentConfig: CurrentModelConfig | null = null
+  try {
+    currentConfig = await getCurrentModelConfig()
+  } catch {
+    currentConfig = null
+  }
+
+  const configuredModel = currentConfig?.model.trim() ?? ''
+  if (configuredModel) {
+    return {
+      model: configuredModel,
+      reasoningEffort: mode === 'plan'
+        ? normalizePlanModeReasoningEffort(effort ?? currentConfig?.reasoningEffort)
+        : normalizeCollaborationModeReasoningEffort(effort ?? currentConfig?.reasoningEffort),
+    }
+  }
+
+  let availableModelIds: string[] = []
+  try {
+    availableModelIds = await getAvailableModelIds()
+  } catch {
+    availableModelIds = []
+  }
+
+  const fallbackModel = availableModelIds.find((candidate) => candidate.trim().length > 0)?.trim() ?? ''
+  if (fallbackModel) {
+    return {
+      model: fallbackModel,
+      reasoningEffort: mode === 'plan'
+        ? normalizePlanModeReasoningEffort(effort ?? currentConfig?.reasoningEffort)
+        : normalizeCollaborationModeReasoningEffort(effort ?? currentConfig?.reasoningEffort),
+    }
+  }
+
+  throw new Error(`${mode === 'plan' ? 'Plan' : 'Default'} mode requires an available model. Wait for models to load and try again.`)
+}
+
 export async function startThreadTurn(
   threadId: string,
   text: string,
@@ -307,8 +1025,10 @@ export async function startThreadTurn(
   effort?: ReasoningEffort,
   skills?: Array<{ name: string; path: string }>,
   fileAttachments: FileAttachmentParam[] = [],
-): Promise<void> {
+  collaborationMode?: CollaborationModeKind,
+): Promise<string> {
   try {
+    const normalizedModel = model?.trim() ?? ''
     const finalText = buildTextWithAttachments(text, fileAttachments)
     const input: Array<Record<string, unknown>> = [{ type: 'text', text: finalText }]
     for (const imageUrl of imageUrls) {
@@ -331,13 +1051,25 @@ export async function startThreadTurn(
       input,
     }
     if (attachments.length > 0) params.attachments = attachments
-    if (typeof model === 'string' && model.length > 0) {
-      params.model = model
+    if (normalizedModel) {
+      params.model = normalizedModel
     }
     if (typeof effort === 'string' && effort.length > 0) {
       params.effort = effort
     }
-    await callRpc('turn/start', params)
+    if (collaborationMode) {
+      const collaborationModeSettings = await resolveCollaborationModeSettings(collaborationMode, normalizedModel, effort)
+      params.collaborationMode = {
+        mode: collaborationMode,
+        settings: {
+          model: collaborationModeSettings.model,
+          reasoning_effort: collaborationModeSettings.reasoningEffort,
+          developer_instructions: null,
+        },
+      }
+    }
+    const payload = await callRpc<{ turn?: Turn }>('turn/start', params)
+    return typeof payload?.turn?.id === 'string' ? payload.turn.id.trim() : ''
   } catch (error) {
     throw normalizeCodexApiError(error, `Failed to start turn for thread ${threadId}`, 'turn/start')
   }
@@ -390,6 +1122,30 @@ export async function getAvailableModelIds(): Promise<string[]> {
     if (!candidate || ids.includes(candidate)) continue
     ids.push(candidate)
   }
+
+  try {
+    const response = await fetch('/codex-api/provider-models', {
+      signal: AbortSignal.timeout(PROVIDER_MODELS_FETCH_TIMEOUT_MS),
+    })
+    let providerPayload: ProviderModelsResponse | null = null
+    try {
+      providerPayload = await response.json() as ProviderModelsResponse
+    } catch {
+      providerPayload = null
+    }
+
+    if (response.ok && Array.isArray(providerPayload?.data)) {
+      for (const candidate of providerPayload.data) {
+        if (typeof candidate !== 'string') continue
+        const normalized = candidate.trim()
+        if (!normalized || ids.includes(normalized)) continue
+        ids.push(normalized)
+      }
+    }
+  } catch {
+    // Keep Codex usable when the provider-models endpoint is unavailable.
+  }
+
   return ids
 }
 
@@ -401,8 +1157,50 @@ export async function getCurrentModelConfig(): Promise<CurrentModelConfig> {
   return { model, reasoningEffort, speedMode }
 }
 
-export async function getAccountRateLimits(): Promise<GetAccountRateLimitsResponse> {
+export async function getAccountRateLimitsResponse(): Promise<GetAccountRateLimitsResponse> {
   return await callRpc<GetAccountRateLimitsResponse>('account/rateLimits/read')
+}
+
+function normalizeCollaborationModeLabel(value: string): string {
+  const trimmed = value.trim()
+  if (!trimmed) return ''
+  return trimmed
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, (segment) => segment.toUpperCase())
+}
+
+export async function getAvailableCollaborationModes(): Promise<CollaborationModeOption[]> {
+  try {
+    const payload = await callRpc<CollaborationModeListResponse>('collaborationMode/list', {})
+    const seen = new Set<CollaborationModeKind>()
+    const normalized: CollaborationModeOption[] = []
+
+    for (const row of payload.data) {
+      const mode = row.mode
+      if (mode !== 'default' && mode !== 'plan') continue
+      if (seen.has(mode)) continue
+      seen.add(mode)
+      normalized.push({
+        value: mode,
+        label: normalizeCollaborationModeLabel(row.name || mode) || (mode === 'plan' ? 'Plan' : 'Default'),
+      })
+    }
+
+    if (normalized.length > 0) {
+      for (const fallback of DEFAULT_COLLABORATION_MODE_OPTIONS) {
+        if (!seen.has(fallback.value)) {
+          normalized.push(fallback)
+        }
+      }
+      return normalized.sort((first, second) => (
+        first.value === second.value ? 0 : first.value === 'default' ? -1 : 1
+      ))
+    }
+  } catch {
+    // Fall back to static options when the app-server does not expose presets.
+  }
+
+  return DEFAULT_COLLABORATION_MODE_OPTIONS
 }
 
 function normalizeWorkspaceRootsState(payload: unknown): WorkspaceRootsState {
@@ -469,30 +1267,75 @@ export async function createWorktree(sourceCwd: string): Promise<WorktreeCreateR
   }
 }
 
-export async function autoCommitWorktreeChanges(cwd: string, message: string): Promise<WorktreeAutoCommitResult> {
-  const response = await fetch('/codex-api/worktree/auto-commit', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ cwd, message }),
-  })
-  const payload = (await response.json()) as { data?: WorktreeAutoCommitResult; error?: string }
-  if (!response.ok || !payload.data) {
-    throw new Error(payload.error || 'Failed to auto-commit rollback changes')
+export async function getReviewSnapshot(
+  cwd: string,
+  scope: UiReviewScope,
+  workspaceView: UiReviewWorkspaceView,
+  baseBranch?: string | null,
+): Promise<UiReviewSnapshot> {
+  const query = new URLSearchParams({ cwd, scope, workspaceView })
+  if (baseBranch && baseBranch.trim()) {
+    query.set('baseBranch', baseBranch.trim())
   }
-  return payload.data
+  const response = await fetch(`/codex-api/review/snapshot?${query.toString()}`)
+  const payload = (await response.json()) as unknown
+  if (!response.ok) {
+    throw new Error(getErrorMessageFromPayload(payload, 'Failed to load review snapshot'))
+  }
+  return normalizeReviewSnapshot(payload)
 }
 
-export async function rollbackWorktreeToMessage(cwd: string, message: string): Promise<WorktreeRollbackResult> {
-  const response = await fetch('/codex-api/worktree/rollback-to-message', {
+export async function applyReviewAction(payload: {
+  cwd: string
+  scope: UiReviewScope
+  workspaceView: UiReviewWorkspaceView
+  action: UiReviewAction
+  level: UiReviewActionLevel
+  path?: string
+  previousPath?: string | null
+  patch?: string
+}): Promise<UiReviewSnapshot> {
+  const response = await fetch('/codex-api/review/action', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ cwd, message }),
+    body: JSON.stringify(payload),
   })
-  const payload = (await response.json()) as { data?: WorktreeRollbackResult; error?: string }
-  if (!response.ok || !payload.data) {
-    throw new Error(payload.error || 'Failed to rollback project to message commit')
+  const data = (await response.json()) as unknown
+  if (!response.ok) {
+    throw new Error(getErrorMessageFromPayload(data, 'Failed to apply review action'))
   }
-  return payload.data
+  return normalizeReviewSnapshot(data)
+}
+
+export async function initializeReviewGit(cwd: string): Promise<void> {
+  const response = await fetch('/codex-api/review/git/init', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cwd }),
+  })
+  const payload = (await response.json()) as unknown
+  if (!response.ok) {
+    throw new Error(getErrorMessageFromPayload(payload, 'Failed to initialize Git'))
+  }
+}
+
+export async function startThreadReview(
+  threadId: string,
+  scope: UiReviewScope,
+  workspaceView: UiReviewWorkspaceView,
+  baseBranch?: string | null,
+): Promise<void> {
+  const target = scope === 'baseBranch'
+    ? { type: 'baseBranch' as const, branch: (baseBranch ?? '').trim() }
+    : { type: 'uncommittedChanges' as const }
+  if (target.type === 'baseBranch' && !target.branch) {
+    throw new Error('Base branch is unavailable')
+  }
+  await callRpc('review/start', {
+    threadId,
+    target,
+    delivery: 'inline',
+  })
 }
 
 export async function getHomeDirectory(): Promise<string> {
@@ -510,6 +1353,51 @@ export async function getHomeDirectory(): Promise<string> {
       ? (record.data as Record<string, unknown>)
       : {}
   return typeof data.path === 'string' ? data.path.trim() : ''
+}
+
+export async function listLocalDirectories(path: string, options?: { showHidden?: boolean }): Promise<LocalDirectoryListing> {
+  const query = new URLSearchParams({ path })
+  if (options?.showHidden === true) {
+    query.set('showHidden', '1')
+  }
+  const response = await fetch(`/codex-local-directories?${query.toString()}`)
+  const payload = await readJsonResponse(response)
+  if (!response.ok) {
+    const message = getErrorMessageFromPayload(payload, 'Failed to load local directories')
+    throw new Error(message)
+  }
+
+  const record =
+    payload && typeof payload === 'object' && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>)
+      : {}
+  const data =
+    record.data && typeof record.data === 'object' && !Array.isArray(record.data)
+      ? (record.data as Record<string, unknown>)
+      : {}
+  const entriesRaw = Array.isArray(data.entries) ? data.entries : []
+
+  return {
+    path: typeof data.path === 'string' ? normalizePathForUi(data.path) : '',
+    parentPath: typeof data.parentPath === 'string' ? normalizePathForUi(data.parentPath) : '',
+    entries: entriesRaw.flatMap((item) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return []
+      const record = item as Record<string, unknown>
+      const name = typeof record.name === 'string' ? record.name.trim() : ''
+      const entryPath = typeof record.path === 'string' ? normalizePathForUi(record.path) : ''
+      return name && entryPath ? [{ name, path: entryPath }] : []
+    }),
+  }
+}
+
+async function readJsonResponse(response: Response): Promise<unknown> {
+  const raw = await response.text()
+  if (!raw) return {}
+  try {
+    return JSON.parse(raw) as unknown
+  } catch {
+    throw new Error(`Expected JSON response from ${response.url || 'request'}`)
+  }
 }
 
 export async function setWorkspaceRootsState(nextState: WorkspaceRootsState): Promise<void> {
@@ -548,6 +1436,28 @@ export async function openProjectRoot(path: string, options?: { createIfMissing?
       : {}
   const normalizedPath = typeof data.path === 'string' ? normalizePathForUi(data.path) : ''
   return normalizedPath
+}
+
+export async function createLocalDirectory(path: string): Promise<string> {
+  const response = await fetch('/codex-api/local-directory', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  })
+  const payload = await readJsonResponse(response)
+  if (!response.ok) {
+    const message = getErrorMessageFromPayload(payload, 'Failed to create local directory')
+    throw new Error(message)
+  }
+  const record =
+    payload && typeof payload === 'object' && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>)
+      : {}
+  const data =
+    record.data && typeof record.data === 'object' && !Array.isArray(record.data)
+      ? (record.data as Record<string, unknown>)
+      : {}
+  return typeof data.path === 'string' ? normalizePathForUi(data.path) : ''
 }
 
 export async function getProjectRootSuggestion(basePath: string): Promise<{ name: string; path: string }> {
@@ -827,6 +1737,10 @@ function getErrorMessageFromPayload(payload: unknown, fallback: string): string 
   const record = payload && typeof payload === 'object' && !Array.isArray(payload)
     ? (payload as Record<string, unknown>)
     : {}
+  const message = record.message
+  if (typeof message === 'string' && message.trim().length > 0) {
+    return message
+  }
   const error = record.error
   return typeof error === 'string' && error.trim().length > 0 ? error : fallback
 }
@@ -912,15 +1826,25 @@ export async function getSkillsList(cwds?: string[]): Promise<SkillInfo[]> {
   }
 }
 
+const FILE_UPLOAD_TIMEOUT_MS = 60_000
+
 export async function uploadFile(file: File): Promise<string | null> {
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), FILE_UPLOAD_TIMEOUT_MS)
   try {
     const form = new FormData()
     form.append('file', file)
-    const resp = await fetch('/codex-api/upload-file', { method: 'POST', body: form })
+    const resp = await fetch('/codex-api/upload-file', {
+      method: 'POST',
+      body: form,
+      signal: controller.signal,
+    })
     if (!resp.ok) return null
     const data = (await resp.json()) as { path?: string }
     return data.path ?? null
   } catch {
     return null
+  } finally {
+    clearTimeout(timeoutId)
   }
 }
