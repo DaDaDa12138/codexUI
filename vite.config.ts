@@ -1,10 +1,10 @@
 import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
 import { createCodexBridgeMiddleware } from "./src/server/codexAppServerBridge";
-import { createDirectoryListingHtml, createTextEditorHtml, decodeBrowsePath, isTextEditableFile, normalizeLocalPath } from "./src/server/localBrowseUi";
+import { createDirectoryListingHtml, createTextEditorHtml, decodeBrowsePath, getLocalDirectoryListing, isTextEditableFile, normalizeLocalPath } from "./src/server/localBrowseUi";
 import tailwindcss from "@tailwindcss/vite";
 import { spawnSync } from "node:child_process";
-import { createReadStream } from "node:fs";
+import { createReadStream, existsSync, readFileSync } from "node:fs";
 import { stat, writeFile } from "node:fs/promises";
 import { basename, extname, isAbsolute } from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
@@ -79,10 +79,34 @@ const worktreeName = getWorktreeName();
 const appVersion = typeof pkg.version === "string" ? pkg.version : "unknown";
 const WS_UPGRADE_ATTACHED_KEY = "__codexBridgeWsAttached__";
 
+function readEnvValueFromFile(filePath: string, key: string): string {
+  if (!existsSync(filePath)) return "";
+  const raw = readFileSync(filePath, "utf8");
+  for (const line of raw.split(/\r?\n/u)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const separator = trimmed.indexOf("=");
+    if (separator <= 0) continue;
+    const currentKey = trimmed.slice(0, separator).trim();
+    if (currentKey !== key) continue;
+    return trimmed.slice(separator + 1).trim();
+  }
+  return "";
+}
+
+function resolveViteRollbackDebugFallback(): string {
+  const fromEnvLocal = readEnvValueFromFile(".env.local", "VITE_ROLLBACK_DEBUG");
+  if (fromEnvLocal) return fromEnvLocal;
+  return readEnvValueFromFile(".env", "VITE_ROLLBACK_DEBUG");
+}
+
+const viteRollbackDebugFallback = resolveViteRollbackDebugFallback();
+
 export default defineConfig({
   define: {
     "import.meta.env.VITE_WORKTREE_NAME": JSON.stringify(worktreeName),
     "import.meta.env.VITE_APP_VERSION": JSON.stringify(appVersion),
+    "import.meta.env.VITE_ROLLBACK_DEBUG_FALLBACK": JSON.stringify(viteRollbackDebugFallback),
   },
   server: {
     host: "0.0.0.0",
@@ -206,9 +230,43 @@ export default defineConfig({
         server.middlewares.use(async (req, res, next) => {
           if (!req.url || (req.method !== "GET" && req.method !== "HEAD")) return next();
           const url = new URL(req.url, "http://localhost");
+          if (url.pathname !== "/codex-local-directories") return next();
+
+          const showHidden = ["1", "true", "yes", "on"].includes((url.searchParams.get("showHidden") ?? "").toLowerCase());
+          const localPath = normalizeLocalPath(url.searchParams.get("path") ?? "");
+          if (!localPath || !isAbsolute(localPath)) {
+            res.statusCode = 400;
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify({ error: "Expected absolute local directory path." }));
+            return;
+          }
+
+          try {
+            const fileStat = await stat(localPath);
+            if (!fileStat.isDirectory()) {
+              res.statusCode = 400;
+              res.setHeader("Content-Type", "application/json");
+              res.end(JSON.stringify({ error: "Expected directory path." }));
+              return;
+            }
+
+            const data = await getLocalDirectoryListing(localPath, { showHidden });
+            res.statusCode = 200;
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify({ data }));
+          } catch {
+            res.statusCode = 404;
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify({ error: "Directory not found." }));
+          }
+        });
+        server.middlewares.use(async (req, res, next) => {
+          if (!req.url || (req.method !== "GET" && req.method !== "HEAD")) return next();
+          const url = new URL(req.url, "http://localhost");
           if (!url.pathname.startsWith("/codex-local-browse/")) return next();
 
           const localPath = decodeBrowsePath(url.pathname.slice("/codex-local-browse".length));
+          const newProjectName = url.searchParams.get("newProjectName") ?? "";
           if (!localPath || !isAbsolute(localPath)) {
             res.statusCode = 400;
             res.setHeader("Content-Type", "application/json");
@@ -220,7 +278,7 @@ export default defineConfig({
             const fileStat = await stat(localPath);
             res.setHeader("Cache-Control", "private, no-store");
             if (fileStat.isDirectory()) {
-              const html = await createDirectoryListingHtml(localPath);
+              const html = await createDirectoryListingHtml(localPath, { newProjectName });
               res.statusCode = 200;
               res.setHeader("Content-Type", "text/html; charset=utf-8");
               res.end(html);

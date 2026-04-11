@@ -97,6 +97,7 @@ const props = defineProps<{
   searchPlaceholder?: string
   showAddAction?: boolean
   addActionLabel?: string
+  addActionMode?: 'inline' | 'event'
   defaultAddValue?: string
   addPlaceholder?: string
 }>()
@@ -104,6 +105,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   'update:modelValue': [value: string]
   add: [value: string]
+  'add-action': []
 }>()
 
 const rootRef = ref<HTMLElement | null>(null)
@@ -125,6 +127,7 @@ const enableSearch = computed(() => props.enableSearch === true)
 const showAddAction = computed(() => props.showAddAction === true)
 const searchPlaceholderText = computed(() => props.searchPlaceholder?.trim() || 'Quick search projects')
 const addActionLabelText = computed(() => props.addActionLabel?.trim() || 'Add new project')
+const addActionMode = computed(() => props.addActionMode ?? 'inline')
 const addPlaceholderText = computed(() => props.addPlaceholder?.trim() || 'Project name or absolute path')
 const filteredOptions = computed(() => {
   const query = searchQuery.value.trim().toLowerCase()
@@ -146,6 +149,12 @@ function onSelect(value: string): void {
 }
 
 function onStartAdd(): void {
+  if (addActionMode.value === 'event') {
+    emit('add-action')
+    isOpen.value = false
+    searchQuery.value = ''
+    return
+  }
   isAdding.value = true
   addDraft.value = props.defaultAddValue?.trim() || ''
   nextTick(() => addInputRef.value?.focus())
@@ -217,7 +226,7 @@ onBeforeUnmount(() => {
 }
 
 .composer-dropdown-trigger {
-  @apply inline-flex h-7 min-w-0 items-center gap-1 border-0 bg-transparent p-0 text-sm leading-none text-zinc-500 outline-none transition;
+  @apply inline-flex min-h-7 min-w-0 items-center gap-1 border-0 bg-transparent px-0 py-0.5 text-sm leading-tight text-zinc-500 outline-none transition;
 }
 
 .composer-dropdown-prefix-icon {
@@ -229,7 +238,7 @@ onBeforeUnmount(() => {
 }
 
 .composer-dropdown-value {
-  @apply whitespace-nowrap text-left truncate;
+  @apply whitespace-nowrap text-left truncate pb-px;
 }
 
 .composer-dropdown-chevron {

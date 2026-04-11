@@ -51,6 +51,12 @@ cloudflared tunnel --url http://localhost:<port>
 It prints the tunnel URL, terminal QR code, and password together in startup output.  
 Use `--no-tunnel` to disable this behavior.
 
+If you are using a provider or AI gateway that is already authenticated and do not want `codexapp` to force `codex login` during startup, use:
+
+```bash
+npx codexapp --no-login
+```
+
 ### Linux 🐧
 ```bash
 node -v   # should be 18+
@@ -90,8 +96,8 @@ If you want to use codexUI from iPhone or iPad Safari, serving it over HTTPS is 
 A practical private setup is to run codexUI locally and publish it inside your tailnet with Tailscale Serve:
 
 ```powershell
-npx codexapp --no-tunnel --port 5999
-tailscale serve --bg 5999
+npx codexapp --no-tunnel --port 5900
+tailscale serve --bg 5900
 ```
 
 Then open:

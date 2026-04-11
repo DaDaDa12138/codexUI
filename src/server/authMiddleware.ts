@@ -2,17 +2,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto'
 import type { IncomingMessage } from 'node:http'
 import type { RequestHandler, Request, Response, NextFunction } from 'express'
 
-const TOKEN_COOKIE = 'codex_web_local_token'
-
-function isLocalhostRequest(req: Request): boolean {
-  const remote = req.socket.remoteAddress ?? ''
-  if (remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1') {
-    return true
-  }
-
-  const host = (req.headers.host ?? '').toLowerCase()
-  return host.startsWith('localhost:') || host === 'localhost' || host.startsWith('127.0.0.1:')
-}
+const TOKEN_COOKIE = 'portal_session'
 
 function constantTimeCompare(a: string, b: string): boolean {
   const bufA = Buffer.from(a)
@@ -43,6 +33,33 @@ function isLocalhostHost(host: string): boolean {
   return normalized.startsWith('localhost:') || normalized === 'localhost' || normalized.startsWith('127.0.0.1:')
 }
 
+function isIPv4Octet(value: string): boolean {
+  if (!/^\d{1,3}$/.test(value)) return false
+  const parsed = Number.parseInt(value, 10)
+  return parsed >= 0 && parsed <= 255
+}
+
+function isTrustedTailscaleIPv4(remote: string): boolean {
+  const normalized = remote.startsWith('::ffff:') ? remote.slice('::ffff:'.length) : remote
+  const parts = normalized.split('.')
+  if (parts.length !== 4 || !parts.every(isIPv4Octet)) {
+    return false
+  }
+
+  const first = Number.parseInt(parts[0] ?? '', 10)
+  const second = Number.parseInt(parts[1] ?? '', 10)
+  return first === 100 && second >= 64 && second <= 127
+}
+
+function isTrustedTailscaleIPv6(remote: string): boolean {
+  const normalized = remote.toLowerCase()
+  return normalized === 'fd7a:115c:a1e0::1' || normalized.startsWith('fd7a:115c:a1e0:')
+}
+
+function isTrustedTailscaleRemote(remote: string): boolean {
+  return isTrustedTailscaleIPv4(remote) || isTrustedTailscaleIPv6(remote)
+}
+
 function isAuthorizedByRequestLike(
   remoteAddress: string | undefined,
   hostHeader: string | undefined,
@@ -50,7 +67,12 @@ function isAuthorizedByRequestLike(
   validTokens: Set<string>,
 ): boolean {
   const remote = remoteAddress ?? ''
-  if (isLocalhostRemote(remote) || isLocalhostHost(hostHeader ?? '')) {
+  // SSH reverse tunnels terminate on loopback, so remoteAddress alone is not enough
+  // to prove this is a direct local browser request.
+  if (isLocalhostRemote(remote) && isLocalhostHost(hostHeader ?? '')) {
+    return true
+  }
+  if (isTrustedTailscaleRemote(remote)) {
     return true
   }
 
@@ -64,7 +86,7 @@ const LOGIN_PAGE_HTML = `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Codex Web Local &mdash; Login</title>
+<title>Codex Web</title>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0a0a0a;color:#e5e5e5;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:1rem}
@@ -80,7 +102,7 @@ button:hover{background:#2563eb}
 </head>
 <body>
 <div class="card">
-<h1>Codex Web Local</h1>
+<h1>Codex Web</h1>
 <form id="f">
 <label for="pw">Password</label>
 <input id="pw" name="password" type="password" autocomplete="current-password" autofocus required>
@@ -144,6 +166,18 @@ export function createAuthSession(password: string): AuthSession {
         }
       })
       return
+    }
+
+    // Handle one-click auth links like /password=<value>
+    if (req.method === 'GET' && req.path.startsWith('/password=')) {
+      const provided = req.path.slice('/password='.length)
+      if (constantTimeCompare(provided, password)) {
+        const token = randomBytes(32).toString('hex')
+        validTokens.add(token)
+        res.setHeader('Set-Cookie', `${TOKEN_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict`)
+        res.redirect(302, '/')
+        return
+      }
     }
 
     // No valid session — serve login page
