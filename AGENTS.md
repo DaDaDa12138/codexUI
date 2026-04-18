@@ -1,44 +1,59 @@
 # AGENTS.md
 
-## "Push to main or commit to main" Means Merge To Local Main
+## Git Workflow (Compact)
 
-- When the user says "push", interpret it as: merge the current work into local `main`
-- Do not push to any remote unless the user explicitly asks to push to a remote.
+- Keep both worktrees clean before merge/rebase:
+  - feature worktree: `git status --short`
+  - main worktree: `git status --short`
+- If any merge/rebase is already in progress, abort it first in that worktree:
+  - merge: `git merge --abort`
+  - rebase: `git rebase --abort`
+- Always checkpoint local changes in main worktree before merge/rebase:
+  - `git add -A && git commit -m "temp-before-merge-<branch>"`
+  - skip only if there are no local changes.
+- Standard merge path:
+  1. commit task in feature worktree
+  2. create/switch feature branch
+  3. rebase feature branch on `main`
+  4. from main worktree: `git checkout main && git merge --no-ff <feature-branch>`
+- If user explicitly asks for a single merge commit, use:
+  - `git checkout main`
+  - `git reset --hard <pre-merge-main-commit>`
+  - `git checkout <feature-branch>`
+  - `git rebase main`
+  - `git checkout main`
+  - `git merge --no-ff <feature-branch> -m "Merge branch '<feature-branch>' into main"`
 
-## Merge to local main flow for worktree:
+## Never Blindly Merge (MANDATORY)
 
-0. In the main worktree, **always stash first** before merge/rebase operations.
-   - `git stash push -u -m "temp-before-merge-<your-branch>"`
-   - After merge completes, restore with `git stash pop`.
+- Never use automatic conflict-bias strategies blindly (for example: `git merge -X theirs`, `git merge -X ours`, `git checkout --theirs .`, `git checkout --ours .`).
+- If conflicts occur, inspect each conflicted file and resolve intentionally.
+- After conflict resolution, run required verification/tests before pushing.
 
-1. In the worktree, commit changes and create a branch.
-   - `git add -A && git commit -m "<message>"`
-   - `git switch -c <your-branch>`
-2. If the user asks for a **single merge commit**, do this exact sequence in the main worktree:
-   - find pre-merge `main` from reflog (example: `git reflog main`)
-   - `git checkout main`
-   - `git reset --hard <pre-merge-main-commit>`
-   - `git checkout <your-branch>`
-   - `git rebase main`
-   - `git checkout main`
-   - `git merge --no-ff <your-branch> -m "Merge branch '<your-branch>' into main"`
-3. Otherwise, merge into local `main` from the main worktree:
-   - `git checkout <your-branch>`
-   - `git rebase main`
-   - `git checkout main`
-   - `git merge --no-ff <your-branch>`
+## Conflict Avoidance and Recovery (MANDATORY)
 
-## package.json Version Conflict Rule
+- Do not rebase long-lived mixed-history branches directly onto `main` if it creates broad unrelated conflicts.
+- Prefer a fresh branch from `main` + cherry-pick only task-relevant commits.
+- If a branch is already checked out in another worktree, rebase/commit there, then merge by branch name from main worktree.
+- If merge pulls unrelated conflicts, abort and retry with a narrower commit set.
 
-- For merge conflicts in `package.json` that only affect the `"version"` field, always ignore the conflict and keep the stashed/local `package.json` version value.
-- Do not block merge completion on `package.json` version-only conflicts.
-- For any merge/rebase conflict involving `package.json`, always resolve by taking the current local/stashed `package.json` entirely (full file replacement), then continue merge.
+## package.json / tests.md Conflict Rule
+
+- For any merge/rebase conflict involving `package.json`, always resolve by taking the current local/checkpoint `package.json` entirely (full file replacement) without additional review, then continue merge.
+- Treat `package.json` as generated/low-priority for conflict resolution and do not block merge completion on its conflicts.
+- If `package.json` has uncommitted changes during merge/rebase workflow, always discard those uncommitted changes and keep the current local/checkpoint `package.json` version.
+- For any merge/rebase conflict involving `tests.md`, always resolve by taking the current local/checkpoint `tests.md` entirely (full file replacement) without additional review, then continue merge.
+- Treat `tests.md` as low-priority for conflict resolution and do not block merge completion on its conflicts.
 
 ## Commit After Each Task
 
 - Always create a commit after completing each discrete task or sub-task.
 - Do not batch multiple tasks into a single commit.
 - Each commit message should describe the specific change made.
+
+## Pre-Merge Squash Review (MANDATORY)
+
+- Before merging to local `main`, diff-compare all changes on the current branch against `main`.
 
 ## Tests Documentation Rule (MANDATORY)
 
@@ -70,7 +85,7 @@
   - inspect row HTML and count expected rendered nodes (for example `strong.message-bold-text`)
   - save screenshot to `output/playwright/<task-name>.png`
 - Playwright test sequence (when Playwright is requested):
-  1. Start or confirm a single dev server instance (`npm run dev -- --host 0.0.0.0 --port 4173`).
+  1. Start or confirm a single dev server instance (`pnpm run dev -- --host 0.0.0.0 --port 4173`).
   2. If there are stale servers on the same port, stop them first to avoid false test results.
   3. Run Playwright CLI against `http://127.0.0.1:4173` (or required test URL) and exercise the changed flow.
   4. For responsive/mobile changes, run checks at 375x812 and 768x1024.
@@ -106,9 +121,72 @@
 - Use this flow when validating UI behavior on Oracle A1 from the local Mac machine.
 - On A1, start the app server with Codex CLI available in `PATH`:
   - `export PATH="$HOME/.npm-global/bin:$PATH"`
-  - `npm run dev -- --host 0.0.0.0 --port 4173`
+  - `pnpm run dev -- --host 0.0.0.0 --port 4173`
 - From Mac, run Playwright against Tailscale URL (`http://100.127.77.25:4173`), not localhost.
 - Verify success with both checks:
   - UI assertion in Playwright (new project/folder appears in sidebar or selector).
   - Filesystem assertion on A1 (`test -d /home/ubuntu/<project-name>`).
 - Save screenshot artifact under `output/playwright/` and include it in the report.
+
+## Playwright Evidence For UI Fixes
+
+- When the user asks to test with Playwright, run the verification on the explicitly requested project/thread context (for example `TestChat`).
+- Screenshot artifacts must show complete passing evidence for the tested feature, not only the base page load.
+- For refresh-persistence fixes, include a post-refresh screenshot that still shows the expected UI state.
+
+## Mandatory CJS + TestChat Validation For Markdown/File-Link Features
+
+- For any markdown parsing, link parsing, file-link rendering, or browse-link encoding change, verification in `TestChat` is mandatory before reporting completion.
+- Use CJS Playwright scripts as the default verification implementation:
+  - `const { chromium } = require('playwright')`
+  - run from repository working directory so local `node_modules` resolves correctly.
+- Required validation flow:
+  1. Start dev server at `http://127.0.0.1:4173`.
+  2. Open project `TestChat`.
+  3. Open an existing TestChat thread, or create one if none exists.
+  4. Send a message with a unique marker plus target markdown link (example: ``<MARKER> [hosting_manager.py](/home/ubuntu/Documents/New Project (2)/hosting_manager.py)``).
+  5. Locate the rendered row by marker.
+  6. Assert a parsed file link exists (`a.message-file-link`) in that row.
+  7. Assert link metadata is correct:
+     - `href` includes encoded full path (example: `/codex-local-browse/home/ubuntu/Documents/New%20Project%20(2)/hosting_manager.py`)
+     - `title` equals the original full file path
+     - visible link text contains expected filename.
+  8. Save screenshot to `output/playwright/testchat-<feature>-cjs.png`.
+- Completion report must include:
+  - tested URL
+  - thread context (`TestChat`)
+  - viewport
+  - exact CJS command/script path
+  - assertion summary (`hrefOk`, `titleOk`, `textOk`)
+  - screenshot absolute path
+
+## LLM Wiki Schema
+
+This repository includes a persistent wiki under `llm-wiki/` maintained by an LLM agent.
+
+### Structure
+- `llm-wiki/raw/`: immutable source notes and captured material.
+- `llm-wiki/wiki/`: synthesized, interlinked markdown pages.
+- `llm-wiki/wiki/index.md`: catalog of pages.
+- `llm-wiki/wiki/log.md`: append-only operation log.
+
+### Conventions
+- Never edit files under `llm-wiki/raw/` after creation.
+- Prefer updating existing wiki pages over creating duplicates.
+- Add wiki links using relative markdown links.
+- Keep factual claims tied to one or more source files in `llm-wiki/raw/`.
+
+### Operations
+- Ingest:
+  1. Add a source under `llm-wiki/raw/`.
+  2. Create or update topic/entity pages under `llm-wiki/wiki/`.
+  3. Update `llm-wiki/wiki/index.md`.
+  4. Append one entry in `llm-wiki/wiki/log.md`.
+- Query:
+  1. Read `llm-wiki/wiki/index.md` first.
+  2. Read relevant linked pages.
+  3. Synthesize an answer and optionally file it back as a page.
+- Lint:
+  1. Check for orphan pages.
+  2. Check for stale or contradictory claims.
+  3. Add follow-up questions to the log.

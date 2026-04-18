@@ -68,9 +68,101 @@
             @export-thread="onExportThread" />
         </div>
 
-        <div v-if="!isSidebarCollapsed" class="sidebar-settings-area">
+        <div
+          v-if="!isSidebarCollapsed"
+          ref="settingsAreaRef"
+          class="sidebar-settings-area"
+          @click="onSettingsAreaClick"
+        >
           <Transition name="settings-panel">
-            <div v-if="isSettingsOpen" class="sidebar-settings-panel">
+            <div
+              v-if="isSettingsOpen"
+              ref="settingsPanelRef"
+              class="sidebar-settings-panel"
+              @click.stop
+            >
+              <div class="sidebar-settings-account-section">
+                <div class="sidebar-settings-account-header">
+                  <div class="sidebar-settings-account-header-main">
+                    <button
+                      class="sidebar-settings-account-collapse"
+                      type="button"
+                      :aria-expanded="!isAccountsSectionCollapsed"
+                      :title="isAccountsSectionCollapsed ? 'Expand accounts' : 'Collapse accounts'"
+                      @click="toggleAccountsSectionCollapsed"
+                    >
+                      <span class="sidebar-settings-account-collapse-icon">{{ isAccountsSectionCollapsed ? '▸' : '▾' }}</span>
+                    </button>
+                    <span class="sidebar-settings-account-title">Accounts</span>
+                    <span class="sidebar-settings-account-count">{{ accounts.length }}</span>
+                  </div>
+                  <button
+                    class="sidebar-settings-account-refresh"
+                    type="button"
+                    :disabled="isRefreshingAccounts || isSwitchingAccounts"
+                    @click="onRefreshAccounts"
+                  >
+                    {{ isRefreshingAccounts ? 'Reloading…' : 'Reload' }}
+                  </button>
+                </div>
+                <template v-if="!isAccountsSectionCollapsed">
+                  <p v-if="accountActionError" class="sidebar-settings-account-error">{{ accountActionError }}</p>
+                  <p v-if="accounts.length === 0" class="sidebar-settings-account-empty">
+                    Run `codex login`, then click reload.
+                  </p>
+                  <div v-else class="sidebar-settings-account-list">
+                  <article
+                    v-for="account in accounts"
+                    :key="account.accountId"
+                    class="sidebar-settings-account-item"
+                    :class="{
+                      'is-active': account.isActive,
+                      'is-unavailable': isAccountUnavailable(account),
+                      'is-confirming-remove': isRemoveConfirmationActive(account),
+                      'is-remove-visible': isRemoveVisible(account),
+                    }"
+                    :title="buildAccountTitle(account)"
+                    @mouseenter="onAccountCardPointerEnter(account.accountId)"
+                    @mouseleave="onAccountCardPointerLeave(account.accountId)"
+                  >
+                    <div class="sidebar-settings-account-main">
+                      <p class="sidebar-settings-account-email">{{ account.email || 'Account' }}</p>
+                      <p class="sidebar-settings-account-meta">
+                        {{ formatAccountMeta(account) }}
+                      </p>
+                      <p class="sidebar-settings-account-quota">
+                        {{ formatAccountQuota(account) }}
+                      </p>
+                      <p class="sidebar-settings-account-id">
+                        Workspace {{ shortAccountId(account.accountId) }}
+                      </p>
+                    </div>
+                    <div class="sidebar-settings-account-actions">
+                      <button
+                        class="sidebar-settings-account-switch"
+                        type="button"
+                        :disabled="isAccountActionDisabled(account) || account.isActive || isAccountUnavailable(account)"
+                        @click="onSwitchAccount(account.accountId)"
+                      >
+                        {{ getAccountSwitchLabel(account) }}
+                      </button>
+                      <button
+                        class="sidebar-settings-account-remove"
+                        :class="{
+                          'is-visible': isRemoveVisible(account),
+                          'is-confirming': isRemoveConfirmationActive(account),
+                        }"
+                        type="button"
+                        :disabled="isAccountActionDisabled(account)"
+                        @click="onRemoveAccount(account.accountId)"
+                      >
+                        {{ getAccountRemoveLabel(account) }}
+                      </button>
+                    </div>
+                  </article>
+                  </div>
+                </template>
+              </div>
               <button class="sidebar-settings-row" type="button" :title="SETTINGS_HELP.sendWithEnter" @click="toggleSendWithEnter">
                 <span class="sidebar-settings-label">Require ⌘ + enter to send</span>
                 <span class="sidebar-settings-toggle" :class="{ 'is-on': !sendWithEnter }" />
@@ -83,6 +175,10 @@
                 <span class="sidebar-settings-label">Appearance</span>
                 <span class="sidebar-settings-value">{{ darkMode === 'system' ? 'System' : darkMode === 'dark' ? 'Dark' : 'Light' }}</span>
               </button>
+              <button class="sidebar-settings-row" type="button" :title="SETTINGS_HELP.chatWidth" @click="cycleChatWidth">
+                <span class="sidebar-settings-label">Chat width</span>
+                <span class="sidebar-settings-value">{{ chatWidthLabel }}</span>
+              </button>
               <button class="sidebar-settings-row" type="button" :title="SETTINGS_HELP.dictationClickToToggle" @click="toggleDictationClickToToggle">
                 <span class="sidebar-settings-label">Click to toggle dictation</span>
                 <span class="sidebar-settings-toggle" :class="{ 'is-on': dictationClickToToggle }" />
@@ -91,14 +187,90 @@
                 <span class="sidebar-settings-label">Auto send dictation</span>
                 <span class="sidebar-settings-toggle" :class="{ 'is-on': dictationAutoSend }" />
               </button>
-              <button class="sidebar-settings-row" type="button" :title="SETTINGS_HELP.rollbackCommits" @click="toggleWorktreeGitAutomation">
-                <span class="sidebar-settings-label">Rollback commits</span>
-                <span class="sidebar-settings-toggle" :class="{ 'is-on': worktreeGitAutomationEnabled }" />
-              </button>
+
               <button class="sidebar-settings-row" type="button" :title="SETTINGS_HELP.githubTrendingProjects" @click="toggleGithubTrendingProjects">
                 <span class="sidebar-settings-label">GitHub trending projects</span>
                 <span class="sidebar-settings-toggle" :class="{ 'is-on': showGithubTrendingProjects }" />
               </button>
+              <div class="sidebar-settings-row sidebar-settings-row--select" title="Choose the API provider for the Codex backend">
+                <span class="sidebar-settings-label">Provider</span>
+                <select
+                  class="sidebar-settings-provider-select"
+                  :value="selectedProvider"
+                  :disabled="freeModeLoading"
+                  @change="onProviderChange(($event.target as HTMLSelectElement).value)"
+                >
+                  <option value="codex">Codex</option>
+                  <option value="openrouter">OpenRouter</option>
+                  <option value="custom">Custom endpoint</option>
+                </select>
+              </div>
+              <div v-if="selectedProvider === 'openrouter'" class="sidebar-settings-row sidebar-settings-row--input">
+                <div class="sidebar-settings-provider-info">
+                  <span class="sidebar-settings-label">OpenRouter API key</span>
+                  <a
+                    class="sidebar-settings-provider-link"
+                    href="https://openrouter.ai/keys"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >Get API key</a>
+                </div>
+                <div class="sidebar-settings-key-group">
+                  <template v-if="freeModeHasCustomKey && !freeModeCustomKey">
+                    <span class="sidebar-settings-key-masked">{{ freeModeCustomKeyMasked }}</span>
+                    <button
+                      class="sidebar-settings-key-clear"
+                      type="button"
+                      :disabled="freeModeCustomKeySaving"
+                      title="Remove custom key, use community keys"
+                      @click="clearFreeModeCustomKey"
+                    >&#x2715;</button>
+                  </template>
+                  <template v-else>
+                    <input
+                      v-model="freeModeCustomKey"
+                      class="sidebar-settings-key-input"
+                      type="password"
+                      placeholder="sk-or-v1-... (optional, uses free keys if empty)"
+                      @keydown.enter="saveFreeModeCustomKey"
+                    />
+                    <button
+                      class="sidebar-settings-key-save"
+                      type="button"
+                      :disabled="freeModeCustomKeySaving || !freeModeCustomKey.trim()"
+                      @click="saveFreeModeCustomKey"
+                    >{{ freeModeCustomKeySaving ? '...' : 'Set' }}</button>
+                  </template>
+                </div>
+              </div>
+              <div v-if="selectedProvider === 'custom'" class="sidebar-settings-row sidebar-settings-row--input">
+                <span class="sidebar-settings-label">Custom endpoint URL</span>
+                <div class="sidebar-settings-key-group">
+                  <input
+                    v-model="customEndpointUrl"
+                    class="sidebar-settings-key-input"
+                    type="url"
+                    placeholder="https://api.example.com/v1"
+                    @keydown.enter="saveCustomEndpoint"
+                  />
+                </div>
+                <span class="sidebar-settings-label" style="margin-top: 4px">API key</span>
+                <div class="sidebar-settings-key-group">
+                  <input
+                    v-model="customEndpointKey"
+                    class="sidebar-settings-key-input"
+                    type="password"
+                    placeholder="Bearer token (optional)"
+                    @keydown.enter="saveCustomEndpoint"
+                  />
+                  <button
+                    class="sidebar-settings-key-save"
+                    type="button"
+                    :disabled="freeModeCustomKeySaving || !customEndpointUrl.trim()"
+                    @click="saveCustomEndpoint"
+                  >{{ freeModeCustomKeySaving ? '...' : 'Save' }}</button>
+                </div>
+              </div>
               <div class="sidebar-settings-row sidebar-settings-row--select" :title="SETTINGS_HELP.dictationLanguage">
                 <span class="sidebar-settings-label">Dictation language</span>
                 <ComposerDropdown
@@ -112,10 +284,61 @@
                   @update:model-value="onDictationLanguageChange"
                 />
               </div>
-              <button class="sidebar-settings-row" type="button" aria-live="polite" @click="onConnectTelegramBot">
+              <button class="sidebar-settings-row" type="button" aria-live="polite" @click="isTelegramConfigOpen = !isTelegramConfigOpen">
                 <span class="sidebar-settings-label">Telegram</span>
                 <span class="sidebar-settings-value">{{ telegramStatusText }}</span>
               </button>
+              <div v-if="isTelegramConfigOpen" class="sidebar-settings-telegram-panel">
+                <label class="sidebar-settings-field">
+                  <span class="sidebar-settings-field-label">Bot token</span>
+                  <input
+                    v-model="telegramBotTokenDraft"
+                    class="sidebar-settings-input"
+                    type="password"
+                    placeholder="123456:ABCDEF"
+                    autocomplete="off"
+                    spellcheck="false"
+                  >
+                </label>
+                <label class="sidebar-settings-field">
+                  <span class="sidebar-settings-field-label">Allowed Telegram user IDs</span>
+                  <textarea
+                    v-model="telegramAllowedUserIdsDraft"
+                    class="sidebar-settings-textarea"
+                    rows="3"
+                    placeholder="123456789&#10;987654321"
+                    spellcheck="false"
+                  />
+                </label>
+                <div class="sidebar-settings-field-help">
+                  Put one Telegram user ID per line or separate them with commas. Use `*` to allow all Telegram users. Unauthorized users will see their own ID in the rejection message so they can copy it here.
+                </div>
+                <div v-if="telegramConfigError" class="sidebar-settings-telegram-error">
+                  {{ telegramConfigError }}
+                </div>
+                <div class="sidebar-settings-telegram-actions">
+                  <button
+                    class="sidebar-settings-telegram-save"
+                    type="button"
+                    :disabled="isTelegramSaving"
+                    @click="saveTelegramConfig"
+                  >
+                    {{ isTelegramSaving ? 'Saving…' : 'Save Telegram config' }}
+                  </button>
+                </div>
+              </div>
+              <div
+                v-if="showThreadContextBadge"
+                class="sidebar-settings-row sidebar-settings-context-row"
+                :data-state="threadContextBadgeState"
+                :title="threadContextTooltip"
+              >
+                <span class="sidebar-settings-label">Context</span>
+                <span class="sidebar-settings-context-value" :data-state="threadContextBadgeState">
+                  {{ threadContextPrimaryText }}
+                  <span class="sidebar-settings-context-meta">{{ threadContextSecondaryText }}</span>
+                </span>
+              </div>
               <div class="sidebar-settings-rate-limits">
                 <RateLimitStatus :snapshots="accountRateLimitSnapshots" />
               </div>
@@ -124,16 +347,24 @@
               </div>
             </div>
           </Transition>
-          <button class="sidebar-settings-button" type="button" @click="isSettingsOpen = !isSettingsOpen">
+          <button
+            ref="settingsButtonRef"
+            class="sidebar-settings-button"
+            type="button"
+            @click.stop="isSettingsOpen = !isSettingsOpen"
+          >
             <IconTablerSettings class="sidebar-settings-icon" />
             <span>Settings</span>
+            <span class="sidebar-settings-button-version">
+              {{ worktreeName }} · v{{ appVersion }}
+            </span>
           </button>
         </div>
       </section>
     </template>
 
     <template #content>
-      <section class="content-root">
+      <section class="content-root" :style="contentStyle">
         <ContentHeader :title="contentTitle">
           <template #leading>
             <SidebarThreadControls
@@ -145,6 +376,19 @@
               @start-new-thread="onStartNewThreadFromToolbar"
             />
           </template>
+          <template #actions>
+            <ComposerDropdown
+              v-if="route.name === 'thread' && selectedThreadId"
+              class="content-header-branch-dropdown"
+              :class="{ 'is-review-open': isReviewPaneOpen }"
+              :model-value="contentHeaderBranchDropdownValue"
+              :options="contentHeaderBranchDropdownOptions"
+              :disabled="isLoadingThreadBranches || isSwitchingThreadBranch"
+              :enable-search="true"
+              search-placeholder="Search branches..."
+              @update:model-value="onSelectContentHeaderBranch"
+            />
+          </template>
         </ContentHeader>
 
         <section class="content-body">
@@ -152,23 +396,168 @@
             <SkillsHub @skills-changed="onSkillsChanged" />
           </template>
           <template v-else-if="isHomeRoute">
-            <div class="content-grid">
+            <div class="content-grid content-grid-home">
               <div class="new-thread-empty">
                 <p class="new-thread-hero">Let's build</p>
                 <ComposerDropdown class="new-thread-folder-dropdown" :model-value="newThreadCwd"
                   :options="newThreadFolderOptions" placeholder="Choose folder"
                   :enable-search="true"
                   search-placeholder="Quick search project"
-                  :show-add-action="true"
-                  add-action-label="+ Add new project"
-                  :default-add-value="defaultNewProjectName"
-                  add-placeholder="Project name or absolute path"
-                  :disabled="false" @update:model-value="onSelectNewThreadFolder"
-                  @add="onAddNewProject" />
+                  :disabled="false" @update:model-value="onSelectNewThreadFolder" />
+                <p v-if="newThreadCwd" class="new-thread-folder-selected" :title="newThreadCwd">
+                  Selected folder: {{ newThreadCwd }}
+                </p>
+                <div class="new-thread-folder-actions">
+                  <button class="new-thread-folder-action new-thread-folder-action-primary" type="button" @click="onOpenExistingFolder">
+                    Select folder
+                  </button>
+                  <button class="new-thread-folder-action" type="button" @click="onCreateProject">
+                    Create Project
+                  </button>
+                </div>
+                <Teleport to="body">
+                  <div v-if="isExistingFolderPickerOpen" class="new-thread-open-folder-overlay" @click.self="onCloseExistingFolderPanel">
+                    <div class="new-thread-open-folder" role="dialog" aria-modal="true" aria-label="Select folder" @keydown.esc.prevent="onCloseExistingFolderPanel">
+                      <div class="new-thread-open-folder-header">
+                        <p class="new-thread-open-folder-title">Select folder</p>
+                        <button class="new-thread-open-folder-close" type="button" @click="onCloseExistingFolderPanel">
+                          Cancel
+                        </button>
+                      </div>
+                      <p class="new-thread-open-folder-label">Current folder</p>
+                      <div class="new-thread-open-folder-current">
+                        <p class="new-thread-open-folder-path" :title="existingFolderBrowsePath || 'Unavailable'">
+                          {{ existingFolderBrowsePath || 'Unavailable' }}
+                        </p>
+                        <button
+                          class="new-thread-folder-action new-thread-folder-action-primary"
+                          type="button"
+                          :disabled="!existingFolderBrowsePath || !!existingFolderError || isExistingFolderLoading || isOpeningExistingFolder"
+                          @click="onConfirmExistingFolder()"
+                        >
+                          {{ isOpeningExistingFolder ? 'Opening…' : 'Open' }}
+                        </button>
+                      </div>
+                      <div class="new-thread-open-folder-actions">
+                        <label class="new-thread-open-folder-toggle">
+                          <input
+                            v-model="showHiddenFolders"
+                            class="new-thread-open-folder-toggle-input"
+                            type="checkbox"
+                            @change="onToggleHiddenFolders"
+                          />
+                          <span>Show hidden folders</span>
+                        </label>
+                        <button
+                          class="new-thread-folder-action"
+                          :class="{ 'new-thread-folder-action-primary': isCreateFolderOpen }"
+                          type="button"
+                          :aria-pressed="isCreateFolderOpen"
+                          :disabled="!existingFolderBrowsePath || isExistingFolderLoading || isOpeningExistingFolder || isCreatingFolder || (!!existingFolderError && !isCreateFolderOpen)"
+                          @click="onOpenCreateFolderPanel"
+                        >
+                          New folder
+                        </button>
+                      </div>
+                      <div v-if="isCreateFolderOpen" class="new-thread-open-folder-create">
+                        <div class="new-thread-open-folder-create-composer">
+                          <input
+                            ref="createFolderInputRef"
+                            v-model="createFolderDraft"
+                            class="new-thread-open-folder-create-input"
+                            type="text"
+                            placeholder="Folder name"
+                            @keydown.enter.prevent="onCreateFolder"
+                            @keydown.esc.prevent="onCloseCreateFolderPanel"
+                          />
+                          <button
+                            class="new-thread-folder-action new-thread-folder-action-primary new-thread-open-folder-create-submit"
+                            type="button"
+                            :disabled="!canCreateFolder || isCreatingFolder"
+                            @click="onCreateFolder"
+                          >
+                            {{ createFolderSubmitLabel }}
+                          </button>
+                        </div>
+                        <p v-if="createFolderError" class="new-thread-open-folder-error">{{ createFolderError }}</p>
+                      </div>
+                      <input
+                        ref="existingFolderFilterInputRef"
+                        v-model="existingFolderFilter"
+                        class="new-thread-open-folder-filter"
+                        type="text"
+                        placeholder="Filter folders..."
+                        @keydown.esc.prevent="onCloseExistingFolderPanel"
+                      />
+                      <div v-if="existingFolderError" class="new-thread-open-folder-error-actions">
+                        <p class="new-thread-open-folder-error">{{ existingFolderError }}</p>
+                        <button
+                          class="new-thread-folder-action"
+                          type="button"
+                          :disabled="isExistingFolderLoading || isOpeningExistingFolder"
+                          @click="onRetryExistingFolderBrowse"
+                        >
+                          Retry
+                        </button>
+                      </div>
+                      <p v-if="isExistingFolderLoading" class="new-thread-open-folder-status">Loading folders…</p>
+                      <p v-else-if="!existingFolderError && existingFolderFilteredEntries.length === 0" class="new-thread-open-folder-status">
+                        {{ existingFolderFilter.trim() ? 'No folders match this filter.' : 'No subfolders found here.' }}
+                      </p>
+                      <ul v-else-if="existingFolderFilteredEntries.length > 0" class="new-thread-open-folder-list">
+                        <li v-for="entry in existingFolderFilteredEntries" :key="entry.key" class="new-thread-open-folder-item">
+                          <button
+                            class="new-thread-open-folder-item-main"
+                            type="button"
+                            :title="entry.path"
+                            :disabled="isExistingFolderLoading || isOpeningExistingFolder"
+                            @click="onBrowseExistingFolder(entry.path)"
+                          >
+                            <span class="new-thread-open-folder-item-name">{{ entry.name }}</span>
+                          </button>
+                          <button
+                            v-if="entry.kind === 'directory'"
+                            class="new-thread-open-folder-item-open"
+                            type="button"
+                            :disabled="isExistingFolderLoading || isOpeningExistingFolder"
+                            @click="onConfirmExistingFolder(entry.path)"
+                          >
+                            Open
+                          </button>
+                        </li>
+                      </ul>
+                    </div>
+                  </div>
+                </Teleport>
                 <ComposerRuntimeDropdown
                   class="new-thread-runtime-dropdown"
                   v-model="newThreadRuntime"
                 />
+                <div v-if="newThreadRuntime === 'worktree'" class="new-thread-branch-select">
+                  <p class="new-thread-branch-select-label">Base branch</p>
+                  <ComposerDropdown
+                    class="new-thread-branch-dropdown"
+                    :model-value="newWorktreeBaseBranch"
+                    :options="newWorktreeBranchDropdownOptions"
+                    placeholder="Select branch"
+                    :enable-search="true"
+                    search-placeholder="Search branches..."
+                    :disabled="isLoadingWorktreeBranches || newWorktreeBranchDropdownOptions.length === 0"
+                    @update:model-value="onSelectNewWorktreeBranch"
+                  />
+                  <p class="new-thread-branch-select-help">
+                    {{
+                      isLoadingWorktreeBranches
+                        ? 'Loading branches…'
+                        : selectedWorktreeBranchLabel
+                          ? `New worktree branch will start from ${selectedWorktreeBranchLabel}.`
+                          : 'No Git branches found for this folder.'
+                    }}
+                  </p>
+                </div>
+                <p class="new-thread-runtime-help">
+                  <code>Local project</code> uses the selected folder directly. <code>New worktree</code> creates an isolated Git worktree before the first prompt.
+                </p>
                 <div
                   v-if="worktreeInitStatus.phase !== 'idle'"
                   class="worktree-init-status"
@@ -221,64 +610,93 @@
                 </div>
               </div>
 
-                <ThreadComposer ref="homeThreadComposerRef" :active-thread-id="composerThreadContextId"
-                :cwd="composerCwd"
-                :models="availableModelIds" :selected-model="selectedModelId"
-                :selected-reasoning-effort="selectedReasoningEffort"
-                :selected-speed-mode="selectedSpeedMode"
-                :is-updating-speed-mode="isUpdatingSpeedMode"
-                :skills="installedSkills"
-                :is-turn-in-progress="false"
-                :is-interrupting-turn="false" :send-with-enter="sendWithEnter" :in-progress-submit-mode="inProgressSendMode"
-                :dictation-click-to-toggle="dictationClickToToggle" :dictation-auto-send="dictationAutoSend"
-                :prepend-draft-request="rollbackDraftPrependRequest"
-                :dictation-language="dictationLanguage"
-                @submit="onSubmitThreadMessage"
-                @update:selected-model="onSelectModel"
-                @update:selected-reasoning-effort="onSelectReasoningEffort"
-                @update:selected-speed-mode="onSelectSpeedMode" />
-            </div>
-          </template>
-          <template v-else>
-            <div class="content-grid">
-              <div class="content-thread">
-                <ThreadConversation :messages="filteredMessages" :is-loading="isLoadingMessages"
-                  :active-thread-id="composerThreadContextId" :cwd="composerCwd" :scroll-state="selectedThreadScrollState"
-                  :live-overlay="liveOverlay"
-                  :pending-requests="selectedThreadServerRequests"
-                  :is-turn-in-progress="isSelectedThreadInProgress"
-                  :is-rolling-back="isRollingBack"
-                  @update-scroll-state="onUpdateThreadScrollState"
-                  @respond-server-request="onRespondServerRequest"
-                  @rollback="onRollback" />
-              </div>
-
               <div class="composer-with-queue">
-                <QueuedMessages
-                  :messages="selectedThreadQueuedMessages"
-                  @edit="onEditQueuedMessage"
-                  @steer="steerQueuedMessage"
-                  @delete="removeQueuedMessage"
-                />
-                <ThreadComposer ref="threadComposerRef" :active-thread-id="composerThreadContextId"
+                <ThreadComposer ref="homeThreadComposerRef" :active-thread-id="composerThreadContextId"
                   :cwd="composerCwd"
-                  :models="availableModelIds"
-                  :selected-model="selectedModelId"
+                  :collaboration-modes="availableCollaborationModes"
+                  :selected-collaboration-mode="selectedCollaborationMode"
+                  :models="availableModelIds" :selected-model="selectedModelId"
                   :selected-reasoning-effort="selectedReasoningEffort"
                   :selected-speed-mode="selectedSpeedMode"
                   :is-updating-speed-mode="isUpdatingSpeedMode"
                   :skills="installedSkills"
-                  :is-turn-in-progress="isSelectedThreadInProgress" :is-interrupting-turn="isInterruptingTurn"
-                  :has-queue-above="selectedThreadQueuedMessages.length > 0"
-                  :send-with-enter="sendWithEnter" :in-progress-submit-mode="inProgressSendMode"
+                  :thread-token-usage="selectedThreadTokenUsage"
+                  :codex-quota="codexQuota"
+                  :is-turn-in-progress="false"
+                  :is-stop-pending="false"
+                  :is-interrupting-turn="false" :send-with-enter="sendWithEnter" :in-progress-submit-mode="inProgressSendMode"
                   :dictation-click-to-toggle="dictationClickToToggle" :dictation-auto-send="dictationAutoSend"
-                  :prepend-draft-request="rollbackDraftPrependRequest"
                   :dictation-language="dictationLanguage"
-                  @submit="onSubmitThreadMessage" @update:selected-model="onSelectModel"
+                  @submit="onSubmitThreadMessage"
+                  @update:selected-collaboration-mode="onSelectCollaborationMode"
+                  @update:selected-model="onSelectModel"
                   @update:selected-reasoning-effort="onSelectReasoningEffort"
-                  @update:selected-speed-mode="onSelectSpeedMode"
-                  @interrupt="onInterruptTurn" />
+                  @update:selected-speed-mode="onSelectSpeedMode" />
               </div>
+            </div>
+          </template>
+          <template v-else>
+            <div class="content-grid">
+              <ReviewPane
+                v-if="isReviewPaneOpen && selectedThreadId && composerCwd"
+                :thread-id="selectedThreadId"
+                :cwd="composerCwd"
+                :is-thread-in-progress="isSelectedThreadInProgress"
+                @close="isReviewPaneOpen = false"
+              />
+
+              <template v-else>
+                <div class="content-thread">
+                  <ThreadConversation ref="threadConversationRef" :messages="filteredMessages" :is-loading="isLoadingMessages"
+                    :active-thread-id="composerThreadContextId" :cwd="composerCwd" :scroll-state="selectedThreadScrollState"
+                    :live-overlay="liveOverlay"
+                    :pending-requests="selectedThreadServerRequests"
+                    @update-scroll-state="onUpdateThreadScrollState"
+                    @fork-thread="onForkThreadFromMessage"
+                    @rollback="onRollback"
+                    @respond-server-request="onRespondServerRequest" />
+                </div>
+
+                <div class="composer-with-queue">
+                  <QueuedMessages
+                    :messages="selectedThreadQueuedMessages"
+                    @edit="onEditQueuedMessage"
+                    @steer="steerQueuedMessage"
+                    @delete="removeQueuedMessage"
+                  />
+                  <ThreadPendingRequestPanel
+                    v-if="selectedThreadPendingRequest"
+                    :request="selectedThreadPendingRequest"
+                    :request-count="selectedThreadServerRequests.length"
+                    :has-queue-above="selectedThreadQueuedMessages.length > 0"
+                    @respond-server-request="onRespondServerRequest"
+                  />
+                  <ThreadComposer v-else ref="threadComposerRef" :active-thread-id="composerThreadContextId"
+                    :cwd="composerCwd"
+                    :collaboration-modes="availableCollaborationModes"
+                    :selected-collaboration-mode="selectedCollaborationMode"
+                    :models="availableModelIds"
+                    :selected-model="selectedModelId"
+                    :selected-reasoning-effort="selectedReasoningEffort"
+                    :selected-speed-mode="selectedSpeedMode"
+                    :is-updating-speed-mode="isUpdatingSpeedMode"
+                    :skills="installedSkills"
+                    :thread-token-usage="selectedThreadTokenUsage"
+                    :codex-quota="codexQuota"
+                    :is-turn-in-progress="isSelectedThreadInProgress"
+                    :is-stop-pending="isSelectedThreadInterruptPending"
+                    :is-interrupting-turn="isInterruptingTurn"
+                    :has-queue-above="selectedThreadQueuedMessages.length > 0"
+                    :send-with-enter="sendWithEnter" :in-progress-submit-mode="inProgressSendMode"
+                    :dictation-click-to-toggle="dictationClickToToggle" :dictation-auto-send="dictationAutoSend"
+                    :dictation-language="dictationLanguage"
+                    @update:selected-collaboration-mode="onSelectCollaborationMode"
+                    @submit="onSubmitThreadMessage" @update:selected-model="onSelectModel"
+                    @update:selected-reasoning-effort="onSelectReasoningEffort"
+                    @update:selected-speed-mode="onSelectSpeedMode"
+                    @interrupt="onInterruptTurn" />
+                </div>
+              </template>
             </div>
           </template>
         </section>
@@ -288,18 +706,17 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import DesktopLayout from './components/layout/DesktopLayout.vue'
 import SidebarThreadTree from './components/sidebar/SidebarThreadTree.vue'
 import ContentHeader from './components/content/ContentHeader.vue'
-import ThreadConversation from './components/content/ThreadConversation.vue'
 import ThreadComposer from './components/content/ThreadComposer.vue'
+import ThreadPendingRequestPanel from './components/content/ThreadPendingRequestPanel.vue'
 import QueuedMessages from './components/content/QueuedMessages.vue'
 import RateLimitStatus from './components/content/RateLimitStatus.vue'
 import ComposerDropdown from './components/content/ComposerDropdown.vue'
 import ComposerRuntimeDropdown from './components/content/ComposerRuntimeDropdown.vue'
-import SkillsHub from './components/content/SkillsHub.vue'
 import SidebarThreadControls from './components/sidebar/SidebarThreadControls.vue'
 import IconTablerSearch from './components/icons/IconTablerSearch.vue'
 import IconTablerSettings from './components/icons/IconTablerSettings.vue'
@@ -307,34 +724,78 @@ import IconTablerX from './components/icons/IconTablerX.vue'
 import { useDesktopState } from './composables/useDesktopState'
 import { useMobile } from './composables/useMobile'
 import {
+  checkoutGitBranch,
   configureTelegramBot,
   createWorktree,
+  getGitBranchState,
+  getWorktreeBranchOptions,
   getGithubProjectsForScope,
+  getAccounts,
+  createLocalDirectory,
   getHomeDirectory,
+  getTelegramConfig,
   getProjectRootSuggestion,
   getTelegramStatus,
   getWorkspaceRootsState,
+  listLocalDirectories,
   openProjectRoot,
+  removeAccount,
+  refreshAccountsFromAuth,
   searchThreads,
+  switchAccount,
 } from './api/codexGateway'
-import type { ReasoningEffort, SpeedMode, ThreadScrollState } from './types/codex'
+import type { ReasoningEffort, SpeedMode, ThreadScrollState, UiAccountEntry, UiRateLimitWindow, UiServerRequest, UiServerRequestReply, UiThreadTokenUsage } from './types/codex'
 import type { ComposerDraftPayload, ThreadComposerExposed } from './components/content/ThreadComposer.vue'
-import type { GithubTipsScope, GithubTrendingProject, TelegramStatus } from './api/codexGateway'
-import { getPathLeafName, getPathParent } from './pathUtils.js'
+import type { GithubTipsScope, GithubTrendingProject, LocalDirectoryEntry, TelegramStatus, WorktreeBranchOption } from './api/codexGateway'
+import { getFreeModeStatus, setFreeMode, setFreeModeCustomKey, setCustomProvider } from './api/codexGateway'
+import { getPathLeafName, getPathParent, normalizePathForUi } from './pathUtils.js'
+
+const ThreadConversation = defineAsyncComponent(() => import('./components/content/ThreadConversation.vue'))
+const ReviewPane = defineAsyncComponent(() => import('./components/content/ReviewPane.vue'))
+const SkillsHub = defineAsyncComponent(() => import('./components/content/SkillsHub.vue'))
 
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'codex-web-local.sidebar-collapsed.v1'
+const ACCOUNTS_SECTION_COLLAPSED_STORAGE_KEY = 'codex-web-local.accounts-section-collapsed.v1'
 const worktreeName = import.meta.env.VITE_WORKTREE_NAME ?? 'unknown'
 const appVersion = import.meta.env.VITE_APP_VERSION ?? 'unknown'
 const SETTINGS_HELP = {
   sendWithEnter: 'When enabled, press Enter to send. When disabled, use Command+Enter to send.',
   inProgressSendMode: 'If a turn is still running, choose whether a new prompt should steer the current turn or be queued.',
   appearance: 'Switch between system theme, light mode, and dark mode.',
+  chatWidth: 'Choose how wide the conversation column and composer can grow on desktop screens.',
   dictationClickToToggle: 'Use click-to-start and click-to-stop dictation instead of hold-to-talk.',
   dictationAutoSend: 'Automatically send transcribed dictation when recording stops.',
-  rollbackCommits: 'When enabled, each message creates a rollback Git commit. On rollback, it resets to the commit before that message.',
+
   githubTrendingProjects: 'Show or hide GitHub trending project cards on the new thread screen.',
   dictationLanguage: 'Choose transcription language or keep auto-detect.',
 } as const
+
+type ChatWidthMode = 'standard' | 'wide' | 'extra-wide'
+
+type ChatWidthPreset = {
+  label: string
+  columnMax: string
+  cardMax: string
+}
+
+const CHAT_WIDTH_PRESETS: Record<ChatWidthMode, ChatWidthPreset> = {
+  standard: {
+    label: 'Standard',
+    columnMax: '45rem',
+    cardMax: '76ch',
+  },
+  wide: {
+    label: 'Wide',
+    columnMax: '72rem',
+    cardMax: '88ch',
+  },
+  'extra-wide': {
+    label: 'Extra wide',
+    columnMax: '96rem',
+    cardMax: '96ch',
+  },
+}
+
 const WHISPER_LANGUAGES: Record<string, string> = {
   en: 'english',
   zh: 'chinese',
@@ -442,11 +903,15 @@ const {
   projectGroups,
   projectDisplayNameById,
   selectedThread,
+  selectedThreadTokenUsage,
   selectedThreadScrollState,
   selectedThreadServerRequests,
   selectedLiveOverlay,
+  codexQuota,
   selectedThreadId,
+  availableCollaborationModes,
   availableModelIds,
+  selectedCollaborationMode,
   selectedModelId,
   selectedReasoningEffort,
   selectedSpeedMode,
@@ -457,24 +922,26 @@ const {
   isLoadingMessages,
   isSendingMessage,
   isInterruptingTurn,
+  isSelectedThreadInterruptPending,
   isUpdatingSpeedMode,
   refreshAll,
   refreshSkills,
   selectThread,
+  ensureThreadMessagesLoaded,
   setThreadScrollState,
   archiveThreadById,
   forkThreadById,
   renameThreadById,
+  forkThreadFromTurn,
   sendMessageToSelectedThread,
   sendMessageToNewThread,
   interruptSelectedThreadTurn,
-  rollbackSelectedThread,
-  isRollingBack,
   selectedThreadQueuedMessages,
   removeQueuedMessage,
   steerQueuedMessage,
+  setSelectedCollaborationMode,
   setSelectedModelId,
-  setWorktreeGitAutomationEnabled,
+
   setSelectedReasoningEffort,
   updateSelectedSpeedMode,
   respondToPendingServerRequest,
@@ -484,6 +951,8 @@ const {
   pinProjectToTop,
   startPolling,
   stopPolling,
+  primeSelectedThread,
+  rollbackSelectedThread,
 } = useDesktopState()
 
 const route = useRoute()
@@ -491,14 +960,19 @@ const router = useRouter()
 const { isMobile } = useMobile()
 const homeThreadComposerRef = ref<ThreadComposerExposed | null>(null)
 const threadComposerRef = ref<ThreadComposerExposed | null>(null)
+const threadConversationRef = ref<{ jumpToLatest: () => void } | null>(null)
 const trendingProjects = ref<GithubTrendingProject[]>([])
 const isTrendingProjectsLoading = ref(false)
 const githubTipsScope = ref<GithubTipsScope>('trending-daily')
 const editingQueuedMessageState = ref<{ threadId: string; queueIndex: number } | null>(null)
 const isRouteSyncInProgress = ref(false)
+let hasPendingRouteSync = false
 const hasInitialized = ref(false)
 const newThreadCwd = ref('')
 const newThreadRuntime = ref<'local' | 'worktree'>('local')
+const newWorktreeBaseBranch = ref('')
+const worktreeBranchOptions = ref<WorktreeBranchOption[]>([])
+const isLoadingWorktreeBranches = ref(false)
 const workspaceRootOptionsState = ref<{ order: string[]; labels: Record<string, string> }>({ order: [], labels: {} })
 const worktreeInitStatus = ref<{ phase: 'idle' | 'running' | 'error'; title: string; message: string }>({
   phase: 'idle',
@@ -509,37 +983,91 @@ const isSidebarCollapsed = ref(loadSidebarCollapsed())
 const sidebarSearchQuery = ref('')
 const isSidebarSearchVisible = ref(false)
 const sidebarSearchInputRef = ref<HTMLInputElement | null>(null)
+const settingsAreaRef = ref<HTMLElement | null>(null)
+const settingsPanelRef = ref<HTMLElement | null>(null)
+const settingsButtonRef = ref<HTMLElement | null>(null)
 const serverMatchedThreadIds = ref<string[] | null>(null)
 let threadSearchTimer: ReturnType<typeof setTimeout> | null = null
 const defaultNewProjectName = ref('New Project (1)')
 const homeDirectory = ref('')
 const isSettingsOpen = ref(false)
+const isAccountsSectionCollapsed = ref(loadAccountsSectionCollapsed())
+const isReviewPaneOpen = ref(false)
+const threadBranchOptions = ref<WorktreeBranchOption[]>([])
+const currentThreadBranch = ref<string | null>(null)
+const isLoadingThreadBranches = ref(false)
+const isSwitchingThreadBranch = ref(false)
+const createFolderInputRef = ref<HTMLInputElement | null>(null)
+const accounts = ref<UiAccountEntry[]>([])
+const isRefreshingAccounts = ref(false)
+const isSwitchingAccounts = ref(false)
+const removingAccountId = ref('')
+const confirmingRemoveAccountId = ref('')
+const hoveredAccountId = ref('')
+const accountActionError = ref('')
 const SEND_WITH_ENTER_KEY = 'codex-web-local.send-with-enter.v1'
 const IN_PROGRESS_SEND_MODE_KEY = 'codex-web-local.in-progress-send-mode.v1'
 const DARK_MODE_KEY = 'codex-web-local.dark-mode.v1'
 const DICTATION_CLICK_TO_TOGGLE_KEY = 'codex-web-local.dictation-click-to-toggle.v1'
 const DICTATION_AUTO_SEND_KEY = 'codex-web-local.dictation-auto-send.v1'
 const DICTATION_LANGUAGE_KEY = 'codex-web-local.dictation-language.v1'
-const WORKTREE_GIT_AUTOMATION_KEY = 'codex-web-local.worktree-git-automation.v1'
+
 const GITHUB_TRENDING_PROJECTS_KEY = 'codex-web-local.github-trending-projects.v1'
+const CHAT_WIDTH_KEY = 'codex-web-local.chat-width.v1'
+const MOBILE_RESUME_RELOAD_MIN_HIDDEN_MS = 400
 const sendWithEnter = ref(loadBoolPref(SEND_WITH_ENTER_KEY, true))
 const inProgressSendMode = ref<'steer' | 'queue'>(loadInProgressSendModePref())
 const darkMode = ref<'system' | 'light' | 'dark'>(loadDarkModePref())
+const chatWidth = ref<ChatWidthMode>(loadChatWidthPref())
 const dictationClickToToggle = ref(loadBoolPref(DICTATION_CLICK_TO_TOGGLE_KEY, false))
-const rollbackDraftPrependRequest = ref<{ id: number; text: string } | null>(null)
-let rollbackDraftPrependRequestId = 0
 const dictationAutoSend = ref(loadBoolPref(DICTATION_AUTO_SEND_KEY, true))
 const dictationLanguage = ref(loadDictationLanguagePref())
 const dictationLanguageOptions = computed(() => buildDictationLanguageOptions())
-const worktreeGitAutomationEnabled = ref(loadBoolPref(WORKTREE_GIT_AUTOMATION_KEY, true))
-const showGithubTrendingProjects = ref(loadBoolPref(GITHUB_TRENDING_PROJECTS_KEY, true))
+
+const showGithubTrendingProjects = ref(loadBoolPref(GITHUB_TRENDING_PROJECTS_KEY, false))
+const freeModeEnabled = ref(false)
+const freeModeLoading = ref(false)
+const freeModeCustomKey = ref('')
+const freeModeHasCustomKey = ref(false)
+const freeModeCustomKeyMasked = ref<string | null>(null)
+const freeModeCustomKeySaving = ref(false)
+const selectedProvider = ref<'codex' | 'openrouter' | 'custom'>('codex')
+const customEndpointUrl = ref('')
+const customEndpointKey = ref('')
+const isTelegramConfigOpen = ref(false)
+const telegramBotTokenDraft = ref('')
+const telegramAllowedUserIdsDraft = ref('')
+const telegramConfigError = ref('')
+const isTelegramSaving = ref(false)
+const isCreateFolderOpen = ref(false)
+const createFolderDraft = ref('')
+const createFolderError = ref('')
+const isCreatingFolder = ref(false)
+const isExistingFolderPickerOpen = ref(false)
+const existingFolderFilterInputRef = ref<HTMLInputElement | null>(null)
+const existingFolderBrowsePath = ref('')
+const existingFolderParentPath = ref('')
+const existingFolderEntries = ref<LocalDirectoryEntry[]>([])
+const existingFolderError = ref('')
+const isExistingFolderLoading = ref(false)
+const isOpeningExistingFolder = ref(false)
+const showHiddenFolders = ref(false)
+const existingFolderFilter = ref('')
 const telegramStatus = ref<TelegramStatus>({
   configured: false,
   active: false,
   mappedChats: 0,
   mappedThreads: 0,
+  allowedUsers: 0,
+  allowAllUsers: false,
   lastError: '',
 })
+const mobileHiddenAtMs = ref<number | null>(null)
+const mobileResumeReloadTriggered = ref(false)
+const mobileResumeSyncInProgress = ref(false)
+let accountStatePollTimer: number | null = null
+let isAccountStatePollInFlight = false
+let existingFolderBrowseRequestId = 0
 
 const routeThreadId = computed(() => {
   const rawThreadId = route.params.threadId
@@ -579,22 +1107,89 @@ const filteredMessages = computed(() =>
     return true
   }),
 )
-const latestUserTurnIndex = computed(() => {
-  let latest = -1
-  for (const message of messages.value) {
+const latestUserTurnId = computed(() => {
+  for (let index = messages.value.length - 1; index >= 0; index -= 1) {
+    const message = messages.value[index]
     if (message.role !== 'user') continue
-    if (typeof message.turnIndex !== 'number') continue
-    if (message.turnIndex > latest) latest = message.turnIndex
+    const turnId = message.turnId?.trim() ?? ''
+    if (turnId.length > 0) return turnId
   }
-  return latest
+  return ''
 })
 const liveOverlay = computed(() => selectedLiveOverlay.value)
 const composerThreadContextId = computed(() => (isHomeRoute.value ? '__new-thread__' : selectedThreadId.value))
+const selectedThreadPendingRequest = computed<UiServerRequest | null>(() => {
+  const rows = selectedThreadServerRequests.value
+  return rows.length > 0 ? rows[rows.length - 1] : null
+})
 const composerCwd = computed(() => {
   if (isHomeRoute.value) return newThreadCwd.value.trim()
   return selectedThread.value?.cwd?.trim() ?? ''
 })
 const isSelectedThreadInProgress = computed(() => !isHomeRoute.value && selectedThread.value?.inProgress === true)
+const showThreadContextBadge = computed(() => !isHomeRoute.value && !isSkillsRoute.value && selectedThreadId.value.trim().length > 0)
+const isAccountSwitchBlocked = computed(() =>
+  isSendingMessage.value ||
+  isInterruptingTurn.value ||
+  isSelectedThreadInProgress.value ||
+  selectedThreadServerRequests.value.length > 0,
+)
+
+function formatCompactTokenCount(value: number): string {
+  if (!Number.isFinite(value)) return '0'
+  return new Intl.NumberFormat('en-US', {
+    notation: value >= 1000 ? 'compact' : 'standard',
+    maximumFractionDigits: value >= 100000 ? 0 : 1,
+  }).format(Math.max(0, Math.trunc(value)))
+}
+
+function buildThreadContextTooltip(usage: UiThreadTokenUsage | null): string {
+  if (!usage) {
+    return 'Waiting for Codex thread/tokenUsage/updated events for this thread.'
+  }
+
+  const lines = [
+    `Current context usage: ${usage.currentContextTokens.toLocaleString()} tokens`,
+    `Cumulative thread usage: ${usage.total.totalTokens.toLocaleString()} tokens`,
+  ]
+
+  if (typeof usage.modelContextWindow === 'number') {
+    lines.unshift(`Model context window: ${usage.modelContextWindow.toLocaleString()} tokens`)
+    lines.push(`Remaining context: ${(usage.remainingContextTokens ?? 0).toLocaleString()} tokens`)
+  } else {
+    lines.push('Model context window is unavailable in the latest usage event.')
+  }
+
+  return lines.join('\n')
+}
+
+const threadContextBadgeState = computed(() => {
+  const remainingPercent = selectedThreadTokenUsage.value?.remainingContextPercent
+  if (remainingPercent === null || typeof remainingPercent !== 'number') return 'pending'
+  if (remainingPercent <= 10) return 'danger'
+  if (remainingPercent <= 25) return 'warning'
+  return 'ok'
+})
+
+const threadContextPrimaryText = computed(() => {
+  const usage = selectedThreadTokenUsage.value
+  if (!usage) return 'Awaiting data'
+  if (typeof usage.remainingContextTokens === 'number') {
+    return `${formatCompactTokenCount(usage.remainingContextTokens)} left`
+  }
+  return `${formatCompactTokenCount(usage.currentContextTokens)} used`
+})
+
+const threadContextSecondaryText = computed(() => {
+  const usage = selectedThreadTokenUsage.value
+  if (!usage) return 'Updates after the next token usage event'
+  if (typeof usage.modelContextWindow === 'number') {
+    return `${formatCompactTokenCount(usage.currentContextTokens)} used / ${formatCompactTokenCount(usage.modelContextWindow)}`
+  }
+  return 'Window size unavailable'
+})
+
+const threadContextTooltip = computed(() => buildThreadContextTooltip(selectedThreadTokenUsage.value))
 const newThreadFolderOptions = computed(() => {
   const options: Array<{ value: string; label: string }> = []
   const seenCwds = new Set<string>()
@@ -629,6 +1224,90 @@ const newThreadFolderOptions = computed(() => {
 
   return options
 })
+const newWorktreeBranchDropdownOptions = computed<Array<{ value: string; label: string }>>(() => {
+  const selectedBranch = newWorktreeBaseBranch.value.trim()
+  const options = [...worktreeBranchOptions.value]
+  if (selectedBranch && !options.some((option) => option.value === selectedBranch)) {
+    options.unshift({ value: selectedBranch, label: selectedBranch })
+  }
+  return options
+})
+const selectedWorktreeBranchLabel = computed(() => {
+  const selectedBranch = newWorktreeBaseBranch.value.trim()
+  if (!selectedBranch) return ''
+  const selected = newWorktreeBranchDropdownOptions.value.find((option) => option.value === selectedBranch)
+  return selected?.label ?? selectedBranch
+})
+const contentHeaderBranchDropdownValue = computed(() => currentThreadBranch.value ?? '__detached_head__')
+const contentHeaderBranchDropdownOptions = computed<Array<{ value: string; label: string }>>(() => {
+  const options: Array<{ value: string; label: string }> = [
+    {
+      value: '__review__',
+      label: isReviewPaneOpen.value ? 'Review (Open)' : 'Review',
+    },
+  ]
+  const seen = new Set<string>()
+  const currentBranch = currentThreadBranch.value?.trim() ?? ''
+  if (currentBranch) {
+    options.push({ value: currentBranch, label: currentBranch })
+    seen.add(currentBranch)
+  } else {
+    options.push({ value: '__detached_head__', label: 'Detached HEAD' })
+    seen.add('__detached_head__')
+  }
+  for (const option of threadBranchOptions.value) {
+    if (!option.value || seen.has(option.value)) continue
+    seen.add(option.value)
+    options.push(option)
+  }
+  return options
+})
+const createFolderParentPath = computed(() => existingFolderBrowsePath.value.trim())
+const isCreateFolderNameValid = computed(() => {
+  const draft = createFolderDraft.value.trim()
+  if (!draft) return false
+  if (draft === '.' || draft === '..') return false
+  return !/[\\/]/u.test(draft)
+})
+const canCreateFolder = computed(() => {
+  return isCreateFolderNameValid.value && createFolderParentPath.value.trim().length > 0 && !existingFolderError.value
+})
+const createFolderSubmitLabel = computed(() => {
+  if (isCreatingFolder.value) return 'Creating…'
+  return 'Create'
+})
+const canBrowseExistingFolderParent = computed(() => {
+  const current = existingFolderBrowsePath.value.trim()
+  const parent = existingFolderParentPath.value.trim()
+  return Boolean(current && parent && current !== parent)
+})
+const existingFolderDisplayEntries = computed(() => {
+  const entries: Array<{ key: string; name: string; path: string; kind: 'parent' | 'directory' }> = []
+  if (canBrowseExistingFolderParent.value) {
+    entries.push({
+      key: `parent:${existingFolderParentPath.value}`,
+      name: '..',
+      path: existingFolderParentPath.value,
+      kind: 'parent',
+    })
+  }
+  for (const entry of existingFolderEntries.value) {
+    entries.push({
+      key: `directory:${entry.path}`,
+      name: entry.name,
+      path: entry.path,
+      kind: 'directory',
+    })
+  }
+  return entries
+})
+const existingFolderFilteredEntries = computed(() => {
+  const filter = existingFolderFilter.value.trim().toLowerCase()
+  if (!filter) return existingFolderDisplayEntries.value
+  return existingFolderDisplayEntries.value.filter((entry) =>
+    entry.kind === 'parent' || entry.name.toLowerCase().includes(filter),
+  )
+})
 const darkModeMediaQuery = typeof window !== 'undefined' ? window.matchMedia('(prefers-color-scheme: dark)') : null
 const githubTipsScopeOptions = computed<Array<{ value: GithubTipsScope; label: string }>>(() => [
   { value: 'search-daily', label: 'Search daily' },
@@ -638,32 +1317,56 @@ const githubTipsScopeOptions = computed<Array<{ value: GithubTipsScope; label: s
   { value: 'trending-weekly', label: 'Trending weekly' },
   { value: 'trending-monthly', label: 'Trending monthly' },
 ])
+const chatWidthLabel = computed(() => CHAT_WIDTH_PRESETS[chatWidth.value].label)
+const contentStyle = computed(() => {
+  const preset = CHAT_WIDTH_PRESETS[chatWidth.value]
+  return {
+    '--chat-column-max': preset.columnMax,
+    '--chat-card-max': preset.cardMax,
+  }
+})
 const telegramStatusText = computed(() => {
   if (!telegramStatus.value.configured) return 'Not configured'
   const base = telegramStatus.value.active ? 'Online' : 'Configured (offline)'
-  const mapped = `${telegramStatus.value.mappedChats} chat(s), ${telegramStatus.value.mappedThreads} thread(s)`
+  const allowlist = telegramStatus.value.allowAllUsers
+    ? 'allow all users'
+    : `${telegramStatus.value.allowedUsers} allowed user(s)`
+  const mapped = `${telegramStatus.value.mappedChats} chat(s), ${telegramStatus.value.mappedThreads} thread(s), ${allowlist}`
   const error = telegramStatus.value.lastError ? `, error: ${telegramStatus.value.lastError}` : ''
   return `${base}, ${mapped}${error}`
 })
 
 onMounted(() => {
+  document.addEventListener('pointerdown', onDocumentPointerDown)
   window.addEventListener('keydown', onWindowKeyDown)
+  document.addEventListener('visibilitychange', onDocumentVisibilityChange)
+  window.addEventListener('pageshow', onWindowPageShow)
+  window.addEventListener('focus', onWindowFocus)
   applyDarkMode()
   darkModeMediaQuery?.addEventListener('change', applyDarkMode)
   void initialize()
-  void applyLaunchProjectPathFromUrl()
   void loadHomeDirectory()
   void loadWorkspaceRootOptionsState()
   void refreshDefaultProjectName()
+  void refreshTelegramConfig()
   void refreshTelegramStatus()
+  void loadFreeModeStatus()
   if (showGithubTrendingProjects.value) {
     void loadTrendingProjects()
   }
 })
 
 onUnmounted(() => {
+  document.removeEventListener('pointerdown', onDocumentPointerDown)
   window.removeEventListener('keydown', onWindowKeyDown)
+  document.removeEventListener('visibilitychange', onDocumentVisibilityChange)
+  window.removeEventListener('pageshow', onWindowPageShow)
+  window.removeEventListener('focus', onWindowFocus)
   darkModeMediaQuery?.removeEventListener('change', applyDarkMode)
+  if (accountStatePollTimer !== null) {
+    window.clearInterval(accountStatePollTimer)
+    accountStatePollTimer = null
+  }
   if (threadSearchTimer) {
     clearTimeout(threadSearchTimer)
     threadSearchTimer = null
@@ -695,6 +1398,26 @@ watch(sidebarSearchQuery, (value) => {
   }, 220)
 })
 
+watch(accounts, () => {
+  if (typeof window === 'undefined') return
+  const shouldPoll = accounts.value.some((account) => account.quotaStatus === 'loading')
+  if (!shouldPoll) {
+    if (accountStatePollTimer !== null) {
+      window.clearInterval(accountStatePollTimer)
+      accountStatePollTimer = null
+    }
+    return
+  }
+  if (accountStatePollTimer !== null) return
+  accountStatePollTimer = window.setInterval(() => {
+    if (isAccountStatePollInFlight) return
+    isAccountStatePollInFlight = true
+    void loadAccountsState({ silent: true }).finally(() => {
+      isAccountStatePollInFlight = false
+    })
+  }, 1500)
+}, { deep: true })
+
 function onSkillsChanged(): void {
   void refreshSkills()
 }
@@ -709,8 +1432,63 @@ async function refreshTelegramStatus(): Promise<void> {
       active: false,
       mappedChats: 0,
       mappedThreads: 0,
+      allowedUsers: 0,
+      allowAllUsers: false,
       lastError: message,
     }
+  }
+}
+
+async function refreshTelegramConfig(): Promise<void> {
+  try {
+    const config = await getTelegramConfig()
+    telegramBotTokenDraft.value = config.botToken
+    telegramAllowedUserIdsDraft.value = config.allowedUserIds.map((value) => String(value)).join('\n')
+    telegramConfigError.value = ''
+  } catch (error) {
+    telegramConfigError.value = error instanceof Error ? error.message : 'Failed to load Telegram configuration'
+  }
+}
+
+function parseTelegramAllowedUserIdsInput(value: string): Array<number | '*'> {
+  const rawEntries = value
+    .split(/[\n,]/)
+    .map((entry) => entry.trim().replace(/^(telegram|tg):/i, '').trim())
+    .filter(Boolean)
+  const allowAllUsers = rawEntries.includes('*')
+  const normalizedUserIds = Array.from(new Set(rawEntries
+    .filter((entry) => /^-?\d+$/.test(entry))
+    .map((entry) => Number.parseInt(entry, 10))))
+  return allowAllUsers ? ['*', ...normalizedUserIds] : normalizedUserIds
+}
+
+async function saveTelegramConfig(): Promise<void> {
+  const botToken = telegramBotTokenDraft.value.trim()
+  const allowedUserIds = parseTelegramAllowedUserIdsInput(telegramAllowedUserIdsDraft.value)
+  if (!botToken) {
+    telegramConfigError.value = 'Telegram bot token is required.'
+    return
+  }
+  if (allowedUserIds.length === 0) {
+    telegramConfigError.value = 'At least one allowed Telegram user ID or * is required.'
+    return
+  }
+
+  isTelegramSaving.value = true
+  telegramConfigError.value = ''
+  try {
+    await configureTelegramBot(botToken, allowedUserIds)
+    telegramAllowedUserIdsDraft.value = allowedUserIds.map((value) => String(value)).join('\n')
+    await Promise.all([
+      refreshTelegramConfig(),
+      refreshTelegramStatus(),
+    ])
+    window.alert('Telegram bot configured. Only allowlisted Telegram users can use the bridge.')
+  } catch (error) {
+    telegramConfigError.value = error instanceof Error ? error.message : 'Failed to connect Telegram bot'
+    void refreshTelegramStatus()
+  } finally {
+    isTelegramSaving.value = false
   }
 }
 
@@ -750,6 +1528,236 @@ async function onExportThread(threadId: string): Promise<void> {
   }
   await nextTick()
   onExportChat()
+}
+
+function shortAccountId(accountId: string): string {
+  return accountId.length > 8 ? accountId.slice(-8) : accountId
+}
+
+function formatAccountMeta(account: UiAccountEntry): string {
+  const segments = [account.planType || 'unknown']
+  if (account.authMode) {
+    segments.unshift(account.authMode)
+  }
+  return segments.join(' · ')
+}
+
+function isPaymentRequiredErrorMessage(value: string | null): boolean {
+  if (!value) return false
+  const normalized = value.toLowerCase()
+  return normalized.includes('payment required') || /\b402\b/.test(normalized)
+}
+
+function isAccountUnavailable(account: UiAccountEntry): boolean {
+  return account.unavailableReason === 'payment_required' || isPaymentRequiredErrorMessage(account.quotaError)
+}
+
+function isAccountActionDisabled(account: UiAccountEntry): boolean {
+  return isRefreshingAccounts.value || isSwitchingAccounts.value || removingAccountId.value.length > 0
+    || (account.isActive && removingAccountId.value !== account.accountId && isAccountSwitchBlocked.value)
+}
+
+function isRemoveConfirmationActive(account: UiAccountEntry): boolean {
+  return confirmingRemoveAccountId.value === account.accountId
+}
+
+function isRemoveVisible(account: UiAccountEntry): boolean {
+  return hoveredAccountId.value === account.accountId || isRemoveConfirmationActive(account)
+}
+
+function getAccountSwitchLabel(account: UiAccountEntry): string {
+  if (isAccountUnavailable(account)) return 'Unavailable'
+  if (account.isActive) return 'Active'
+  if (isSwitchingAccounts.value) return 'Switching…'
+  return 'Switch'
+}
+
+function getAccountRemoveLabel(account: UiAccountEntry): string {
+  if (removingAccountId.value === account.accountId) return 'Removing…'
+  if (isRemoveConfirmationActive(account)) return 'Click again to remove'
+  return 'Remove'
+}
+
+function onAccountCardPointerEnter(accountId: string): void {
+  hoveredAccountId.value = accountId
+}
+
+function onAccountCardPointerLeave(accountId: string): void {
+  if (hoveredAccountId.value === accountId) {
+    hoveredAccountId.value = ''
+  }
+  if (removingAccountId.value === accountId) return
+  if (confirmingRemoveAccountId.value === accountId) {
+    confirmingRemoveAccountId.value = ''
+  }
+}
+
+function pickWeeklyQuotaWindow(account: UiAccountEntry) {
+  const quota = account.quotaSnapshot
+  if (!quota) return null
+  const windows = [quota?.primary, quota?.secondary].filter((quotaWindow): quotaWindow is UiRateLimitWindow => quotaWindow !== null)
+  const exactWeekly = windows.find((quotaWindow) => quotaWindow.windowMinutes === 7 * 24 * 60)
+  if (exactWeekly) {
+    return exactWeekly
+  }
+  const longerWindow = windows
+    .filter((quotaWindow) => typeof quotaWindow.windowMinutes === 'number' && quotaWindow.windowMinutes >= 7 * 24 * 60)
+    .sort((first, second) => (first.windowMinutes ?? 0) - (second.windowMinutes ?? 0))[0] ?? null
+  if (longerWindow) {
+    return longerWindow
+  }
+  return quota.secondary ?? null
+}
+
+function formatResetDateCompact(resetsAt: number | null): string {
+  if (typeof resetsAt !== 'number' || !Number.isFinite(resetsAt)) return ''
+  const date = new Date(resetsAt * 1000)
+  return `${date.getMonth() + 1}月${date.getDate()}日`
+}
+
+function formatAccountQuota(account: UiAccountEntry): string {
+  if (isAccountUnavailable(account)) {
+    return account.quotaError || '402 Payment Required'
+  }
+  const quota = account.quotaSnapshot
+  const window = pickWeeklyQuotaWindow(account)
+  const fallbackWindow = quota?.primary ?? quota?.secondary ?? null
+  const displayWindow = window ?? fallbackWindow
+  if (displayWindow) {
+    const remainingPercent = Math.max(0, Math.min(100, 100 - Math.round(displayWindow.usedPercent)))
+    const refreshDate = formatResetDateCompact(displayWindow.resetsAt)
+    return refreshDate
+      ? `${remainingPercent}% weekly remaining · ${refreshDate}`
+      : `${remainingPercent}% weekly remaining`
+  }
+  if (quota?.credits?.unlimited) {
+    return 'Unlimited credits'
+  }
+  if (quota?.credits?.hasCredits && quota.credits.balance) {
+    return `${quota.credits.balance} credits`
+  }
+  if (account.quotaStatus === 'loading') {
+    return 'Loading quota…'
+  }
+  if (account.quotaStatus === 'error') {
+    return account.quotaError || 'Quota unavailable'
+  }
+  if (account.quotaStatus === 'ready' || account.quotaStatus === 'idle') {
+    return 'Quota unavailable'
+  }
+  return 'Fetching account details…'
+}
+
+function buildAccountTitle(account: UiAccountEntry): string {
+  return [
+    account.email || 'Account',
+    formatAccountMeta(account),
+    isAccountUnavailable(account) ? 'Unavailable account' : null,
+    formatAccountQuota(account),
+    `Workspace ${account.accountId}`,
+  ].filter(Boolean).join('\n')
+}
+
+async function loadAccountsState(options: { silent?: boolean } = {}): Promise<void> {
+  try {
+    const result = await getAccounts()
+    accounts.value = result.accounts
+    if (!result.accounts.some((account) => account.accountId === hoveredAccountId.value)) {
+      hoveredAccountId.value = ''
+    }
+    if (!result.accounts.some((account) => account.accountId === confirmingRemoveAccountId.value)) {
+      confirmingRemoveAccountId.value = ''
+    }
+  } catch (error) {
+    if (options.silent === true) return
+    accountActionError.value = error instanceof Error ? error.message : 'Failed to load accounts'
+  }
+}
+
+async function onRefreshAccounts(): Promise<void> {
+  if (isRefreshingAccounts.value || isSwitchingAccounts.value) return
+  accountActionError.value = ''
+  hoveredAccountId.value = ''
+  confirmingRemoveAccountId.value = ''
+  isRefreshingAccounts.value = true
+  try {
+    const result = await refreshAccountsFromAuth()
+    accounts.value = result.accounts
+    stopPolling()
+    startPolling()
+    void refreshAll({
+      includeSelectedThreadMessages: true,
+    })
+  } catch (error) {
+    accountActionError.value = error instanceof Error ? error.message : 'Failed to refresh accounts'
+  } finally {
+    isRefreshingAccounts.value = false
+  }
+}
+
+async function onSwitchAccount(accountId: string): Promise<void> {
+  if (isSwitchingAccounts.value || isRefreshingAccounts.value) return
+  if (isAccountSwitchBlocked.value) {
+    accountActionError.value = 'Finish the current turn and pending requests before switching accounts.'
+    return
+  }
+  accountActionError.value = ''
+  hoveredAccountId.value = ''
+  confirmingRemoveAccountId.value = ''
+  isSwitchingAccounts.value = true
+  try {
+    const nextActiveAccount = await switchAccount(accountId)
+    accounts.value = accounts.value.map((account) => (
+      account.accountId === accountId
+        ? nextActiveAccount
+        : { ...account, isActive: false }
+    ))
+    stopPolling()
+    startPolling()
+    void refreshAll({
+      includeSelectedThreadMessages: true,
+    })
+    void loadAccountsState({ silent: true })
+  } catch (error) {
+    accountActionError.value = error instanceof Error ? error.message : 'Failed to switch account'
+  } finally {
+    isSwitchingAccounts.value = false
+  }
+}
+
+async function onRemoveAccount(accountId: string): Promise<void> {
+  if (isRefreshingAccounts.value || isSwitchingAccounts.value || removingAccountId.value.length > 0) return
+  const targetAccount = accounts.value.find((account) => account.accountId === accountId) ?? null
+  if (!targetAccount) return
+  if (confirmingRemoveAccountId.value !== accountId) {
+    confirmingRemoveAccountId.value = accountId
+    return
+  }
+  if (targetAccount.isActive && isAccountSwitchBlocked.value) {
+    accountActionError.value = 'Finish the current turn and pending requests before removing the active account.'
+    return
+  }
+
+  const removedWasActive = targetAccount.isActive
+  accountActionError.value = ''
+  confirmingRemoveAccountId.value = ''
+  removingAccountId.value = accountId
+  try {
+    const result = await removeAccount(accountId)
+    accounts.value = result.accounts
+    stopPolling()
+    startPolling()
+    if (removedWasActive) {
+      void refreshAll({
+        includeSelectedThreadMessages: true,
+      })
+    }
+    void loadAccountsState({ silent: true })
+  } catch (error) {
+    accountActionError.value = error instanceof Error ? error.message : 'Failed to remove account'
+  } finally {
+    removingAccountId.value = ''
+  }
 }
 
 function onArchiveThread(threadId: string): void {
@@ -826,8 +1834,10 @@ function onRenameThread(payload: { threadId: string; title: string }): void {
   void renameThreadById(payload.threadId, payload.title)
 }
 
-function onRemoveProject(projectName: string): void {
-  removeProject(projectName)
+async function onRemoveProject(projectName: string): Promise<void> {
+  await removeProject(projectName)
+  await loadWorkspaceRootOptionsState()
+  void refreshDefaultProjectName()
 }
 
 function onReorderProject(payload: { projectName: string; toIndex: number }): void {
@@ -838,8 +1848,30 @@ function onUpdateThreadScrollState(payload: { threadId: string; state: ThreadScr
   setThreadScrollState(payload.threadId, payload.state)
 }
 
-function onRespondServerRequest(payload: { id: number; result?: unknown; error?: { code?: number; message: string } }): void {
-  void respondToPendingServerRequest(payload)
+function onRespondServerRequest(payload: UiServerRequestReply): void {
+  void handleServerRequestResponse(payload)
+}
+
+async function handleServerRequestResponse(payload: UiServerRequestReply): Promise<void> {
+  const responded = await respondToPendingServerRequest(payload)
+  const followUpMessageText = payload.followUpMessageText?.trim() ?? ''
+  if (!responded || !followUpMessageText || isHomeRoute.value) return
+
+  try {
+    await sendMessageToSelectedThread(followUpMessageText, [], [], 'steer', [])
+  } catch {
+    // sendMessageToSelectedThread already surfaces the error through shared state.
+  }
+}
+
+async function onForkThreadFromMessage(payload: { threadId: string; turnIndex: number }): Promise<void> {
+  const forkedThreadId = await forkThreadFromTurn(payload.threadId, payload.turnIndex)
+  if (!forkedThreadId) return
+  await router.push({ name: 'thread', params: { threadId: forkedThreadId } })
+  if (selectedThreadId.value !== forkedThreadId) {
+    await selectThread(forkedThreadId)
+  }
+  if (isMobile.value) setSidebarCollapsed(true)
 }
 
 function setSidebarCollapsed(nextValue: boolean): void {
@@ -850,6 +1882,10 @@ function setSidebarCollapsed(nextValue: boolean): void {
 
 function onWindowKeyDown(event: KeyboardEvent): void {
   if (event.defaultPrevented) return
+  if (event.key === 'Escape' && isSettingsOpen.value) {
+    isSettingsOpen.value = false
+    return
+  }
   if (!event.ctrlKey && !event.metaKey) return
   if (event.shiftKey || event.altKey) return
   if (event.key.toLowerCase() !== 'b') return
@@ -857,8 +1893,83 @@ function onWindowKeyDown(event: KeyboardEvent): void {
   setSidebarCollapsed(!isSidebarCollapsed.value)
 }
 
-function onSubmitThreadMessage(payload: { text: string; imageUrls: string[]; fileAttachments: Array<{ label: string; path: string; fsPath: string }>; skills: Array<{ name: string; path: string }>; mode: 'steer' | 'queue'; rollbackLatestUserTurn?: boolean }): void {
+function onDocumentPointerDown(event: PointerEvent): void {
+  if (!isSettingsOpen.value) return
+  const target = event.target
+  if (!(target instanceof Node)) return
+  if (settingsPanelRef.value?.contains(target)) return
+  if (settingsButtonRef.value?.contains(target)) return
+  isSettingsOpen.value = false
+}
+
+function onSettingsAreaClick(event: MouseEvent): void {
+  if (!isSettingsOpen.value) return
+  const target = event.target
+  if (!(target instanceof Node)) return
+  if (settingsPanelRef.value?.contains(target)) return
+  if (settingsButtonRef.value?.contains(target)) return
+  isSettingsOpen.value = false
+}
+
+function onDocumentVisibilityChange(): void {
+  if (typeof document === 'undefined') return
+  if (!isMobile.value) return
+
+  if (document.visibilityState === 'hidden') {
+    mobileHiddenAtMs.value = Date.now()
+    mobileResumeReloadTriggered.value = false
+    return
+  }
+
+  maybeSyncAfterMobileResume()
+}
+
+function onWindowPageShow(event: PageTransitionEvent): void {
+  if (!event.persisted) return
+  maybeSyncAfterMobileResume()
+}
+
+function onWindowFocus(): void {
+  if (route.name === 'home') {
+    void loadWorkspaceRootOptionsState()
+    void refreshDefaultProjectName()
+  }
+  maybeSyncAfterMobileResume()
+}
+
+function maybeSyncAfterMobileResume(): void {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return
+  if (!isMobile.value) return
+  if (document.visibilityState !== 'visible') return
+  if (mobileResumeReloadTriggered.value) return
+  if (mobileHiddenAtMs.value === null) return
+
+  const hiddenForMs = Date.now() - mobileHiddenAtMs.value
+  if (hiddenForMs < MOBILE_RESUME_RELOAD_MIN_HIDDEN_MS) return
+
+  mobileResumeReloadTriggered.value = true
+  mobileHiddenAtMs.value = null
+  void syncAfterMobileResume()
+}
+
+async function syncAfterMobileResume(): Promise<void> {
+  if (mobileResumeSyncInProgress.value) return
+  mobileResumeSyncInProgress.value = true
+
+  try {
+    await refreshAll({
+      includeSelectedThreadMessages: true,
+      awaitAncillaryRefreshes: true,
+    })
+    await syncThreadSelectionWithRoute()
+  } finally {
+    mobileResumeSyncInProgress.value = false
+  }
+}
+
+function onSubmitThreadMessage(payload: { text: string; imageUrls: string[]; fileAttachments: Array<{ label: string; path: string; fsPath: string }>; skills: Array<{ name: string; path: string }>; mode: 'steer' | 'queue' }): void {
   const text = payload.text
+  scheduleMobileConversationJumpToLatest()
   const editingState = editingQueuedMessageState.value
   const queueInsertIndex =
     payload.mode === 'queue'
@@ -869,10 +1980,6 @@ function onSubmitThreadMessage(payload: { text: string; imageUrls: string[]; fil
   editingQueuedMessageState.value = null
   if (isHomeRoute.value) {
     void submitFirstMessageForNewThread(text, payload.imageUrls, payload.skills, payload.fileAttachments)
-    return
-  }
-  if (payload.rollbackLatestUserTurn === true) {
-    void rollbackAndResendDictation(payload)
     return
   }
   void sendMessageToSelectedThread(text, payload.imageUrls, payload.skills, payload.mode, payload.fileAttachments, queueInsertIndex)
@@ -896,23 +2003,6 @@ function onGithubTipsScopeChange(nextValue: string): void {
   const scope = allowed.has(nextValue as GithubTipsScope) ? (nextValue as GithubTipsScope) : 'trending-daily'
   if (githubTipsScope.value === scope) return
   githubTipsScope.value = scope
-}
-
-function onConnectTelegramBot(): void {
-  if (typeof window === 'undefined') return
-  const botToken = window.prompt('Telegram bot token')
-  if (!botToken || !botToken.trim()) return
-
-  void configureTelegramBot(botToken.trim())
-    .then(() => {
-      window.alert('Telegram bot configured. Open the bot DM and send /start.')
-      void refreshTelegramStatus()
-    })
-    .catch((error: unknown) => {
-      const message = error instanceof Error ? error.message : 'Failed to connect Telegram bot'
-      window.alert(message)
-      void refreshTelegramStatus()
-    })
 }
 
 function onSelectTrendingProjectTip(project: GithubTrendingProject): void {
@@ -950,63 +2040,261 @@ function onEditQueuedMessage(messageId: string): void {
   removeQueuedMessage(messageId)
 }
 
-async function rollbackAndResendDictation(payload: {
-  text: string
-  imageUrls: string[]
-  fileAttachments: Array<{ label: string; path: string; fsPath: string }>
-  skills: Array<{ name: string; path: string }>
-}): Promise<void> {
-  if (isSelectedThreadInProgress.value) {
-    await interruptSelectedThreadTurn()
+
+function scheduleMobileConversationJumpToLatest(): void {
+  if (!isMobile.value || isHomeRoute.value) return
+
+  const jumpToLatest = () => {
+    threadConversationRef.value?.jumpToLatest()
   }
-  const rollbackTargetTurnIndex = latestUserTurnIndex.value
-  if (rollbackTargetTurnIndex >= 0) {
-    await rollbackSelectedThread(rollbackTargetTurnIndex)
-  }
-  await sendMessageToSelectedThread(payload.text, payload.imageUrls, payload.skills, 'steer', payload.fileAttachments)
+
+  jumpToLatest()
+  void nextTick(() => {
+    jumpToLatest()
+    if (typeof window === 'undefined') return
+    window.requestAnimationFrame(() => {
+      jumpToLatest()
+      window.requestAnimationFrame(jumpToLatest)
+    })
+  })
 }
 
 function onSelectNewThreadFolder(cwd: string): void {
   newThreadCwd.value = cwd.trim()
+  createFolderError.value = ''
 }
 
-async function onAddNewProject(rawInput: string): Promise<void> {
-  const normalizedInput = rawInput.trim()
-  if (!normalizedInput) return
+function onSelectNewWorktreeBranch(branch: string): void {
+  newWorktreeBaseBranch.value = branch.trim()
+}
 
-  const isPath = looksLikePath(normalizedInput)
+async function loadThreadBranches(cwd: string): Promise<void> {
+  const targetCwd = cwd.trim()
+  if (!targetCwd || route.name !== 'thread') {
+    threadBranchOptions.value = []
+    currentThreadBranch.value = null
+    return
+  }
+  isLoadingThreadBranches.value = true
+  try {
+    const state = await getGitBranchState(targetCwd)
+    threadBranchOptions.value = state.options
+    currentThreadBranch.value = state.currentBranch
+  } catch {
+    threadBranchOptions.value = []
+    currentThreadBranch.value = null
+  } finally {
+    isLoadingThreadBranches.value = false
+  }
+}
+
+function onSelectContentHeaderBranch(value: string): void {
+  if (value === '__review__') {
+    isReviewPaneOpen.value = !isReviewPaneOpen.value
+    return
+  }
+  if (value === '__detached_head__') return
+  if (isSwitchingThreadBranch.value) return
+  const targetBranch = value.trim()
+  if (!targetBranch || targetBranch === (currentThreadBranch.value ?? '')) return
+  const cwd = composerCwd.value.trim()
+  if (!cwd) return
+
+  isSwitchingThreadBranch.value = true
+  void checkoutGitBranch(cwd, targetBranch)
+    .then((branch) => {
+      currentThreadBranch.value = branch || targetBranch
+      isReviewPaneOpen.value = false
+      return loadThreadBranches(cwd)
+    })
+    .catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : 'Failed to switch branch'
+      window.alert(message)
+    })
+    .finally(() => {
+      isSwitchingThreadBranch.value = false
+    })
+}
+
+async function onCreateProject(): Promise<void> {
   const baseDir = await resolveProjectBaseDirectory()
-  const targetPath = isPath
-    ? normalizedInput
-    : joinPath(baseDir, normalizedInput)
+  if (!baseDir) return
+
+  await refreshDefaultProjectName()
+  const suggestedName = defaultNewProjectName.value.trim() || 'New Project (1)'
+  const projectName = window.prompt(`Create project in ${baseDir}`, suggestedName)
+  if (projectName === null) return
+
+  const normalizedProjectName = projectName.trim()
+  if (!normalizedProjectName) return
+
+  const targetPath = normalizeAbsolutePath(joinPath(baseDir, normalizedProjectName))
   if (!targetPath) return
 
   try {
     const normalizedPath = await openProjectRoot(targetPath, {
-      createIfMissing: !isPath,
-      label: isPath ? '' : normalizedInput,
+      createIfMissing: true,
+      label: '',
     })
-    if (normalizedPath) {
-      newThreadCwd.value = normalizedPath
-      pinProjectToTop(getPathLeafName(normalizedPath))
-      void loadWorkspaceRootOptionsState()
-      void refreshDefaultProjectName()
-    }
-  } catch {
-    // Error is surfaced on next request if path is invalid.
+    if (!normalizedPath) return
+
+    newThreadCwd.value = normalizedPath
+    pinProjectToTop(getPathLeafName(normalizedPath))
+    await loadWorkspaceRootOptionsState()
+    await refreshDefaultProjectName()
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to create the project.'
+    window.alert(message)
   }
 }
 
-async function applyLaunchProjectPathFromUrl(): Promise<void> {
-  if (typeof window === 'undefined') return
+async function onOpenExistingFolder(): Promise<void> {
+  const startPath = newThreadCwd.value.trim() || await resolveProjectBaseDirectory()
+  if (!startPath) return
+  isCreateFolderOpen.value = false
+  isExistingFolderPickerOpen.value = true
+  existingFolderFilter.value = ''
+  await loadExistingFolderListing(startPath)
+  if (!existingFolderError.value) {
+    void nextTick(() => existingFolderFilterInputRef.value?.focus())
+  }
+}
+
+function onCloseExistingFolderPanel(): void {
+  existingFolderBrowseRequestId += 1
+  isExistingFolderPickerOpen.value = false
+  isExistingFolderLoading.value = false
+  existingFolderError.value = ''
+  existingFolderFilter.value = ''
+  onCloseCreateFolderPanel()
+}
+
+async function onBrowseExistingFolder(path: string): Promise<void> {
+  if (!path || isExistingFolderLoading.value) return
+  existingFolderFilter.value = ''
+  await loadExistingFolderListing(path)
+}
+
+function onToggleHiddenFolders(): void {
+  const currentPath = existingFolderBrowsePath.value.trim()
+  if (!isExistingFolderPickerOpen.value || !currentPath) return
+  void loadExistingFolderListing(currentPath)
+}
+
+function onRetryExistingFolderBrowse(): void {
+  const currentPath = existingFolderBrowsePath.value.trim()
+  if (!isExistingFolderPickerOpen.value || !currentPath || isExistingFolderLoading.value) return
+  void loadExistingFolderListing(currentPath)
+}
+
+async function onConfirmExistingFolder(path = existingFolderBrowsePath.value): Promise<void> {
+  const targetPath = path.trim()
+  if (!targetPath) return
+
+  existingFolderError.value = ''
+  isOpeningExistingFolder.value = true
+  try {
+    const normalizedPath = await openProjectRoot(targetPath, {
+      createIfMissing: false,
+      label: '',
+    })
+    if (!normalizedPath) {
+      existingFolderError.value = 'Failed to open the selected folder.'
+      return
+    }
+
+    newThreadCwd.value = normalizedPath
+    pinProjectToTop(getPathLeafName(normalizedPath))
+    await loadWorkspaceRootOptionsState()
+    await refreshDefaultProjectName()
+    onCloseExistingFolderPanel()
+  } catch (error) {
+    existingFolderError.value = error instanceof Error ? error.message : 'Failed to open the selected folder.'
+  } finally {
+    isOpeningExistingFolder.value = false
+  }
+}
+
+async function onOpenCreateFolderPanel(): Promise<void> {
+  createFolderError.value = ''
+  if (isCreateFolderOpen.value) {
+    onCloseCreateFolderPanel()
+    return
+  }
+  if (!isExistingFolderPickerOpen.value) {
+    const startPath = newThreadCwd.value.trim() || await resolveProjectBaseDirectory()
+    if (!startPath) return
+    isExistingFolderPickerOpen.value = true
+    existingFolderFilter.value = ''
+    await loadExistingFolderListing(startPath)
+    if (existingFolderError.value) return
+  }
+  if (existingFolderError.value) return
+  createFolderDraft.value = defaultNewProjectName.value
+  isCreateFolderOpen.value = true
+  void nextTick(() => createFolderInputRef.value?.focus())
+}
+
+function onCloseCreateFolderPanel(): void {
+  createFolderError.value = ''
+  createFolderDraft.value = ''
+  isCreateFolderOpen.value = false
+}
+
+async function onCreateFolder(): Promise<void> {
+  const normalizedInput = createFolderDraft.value.trim()
+  if (!normalizedInput) return
+
+  createFolderError.value = ''
+  if (existingFolderError.value) {
+    createFolderError.value = 'Reload the current folder before creating a new one.'
+    return
+  }
+  isCreatingFolder.value = true
+
+  const baseDir = createFolderParentPath.value.trim()
+  const targetPath = normalizeAbsolutePath(joinPath(baseDir, normalizedInput))
+
+  if (!targetPath) {
+    createFolderError.value = 'Unable to determine where the new folder should be created.'
+    isCreatingFolder.value = false
+    return
+  }
+
+  if (!isCreateFolderNameValid.value) {
+    createFolderError.value = 'Enter a single folder name.'
+    isCreatingFolder.value = false
+    return
+  }
+
+  try {
+    const normalizedPath = await createLocalDirectory(targetPath)
+    if (!normalizedPath) {
+      createFolderError.value = 'Failed to create the folder.'
+      return
+    }
+
+    createFolderError.value = ''
+    existingFolderFilter.value = ''
+    await loadExistingFolderListing(normalizedPath)
+    onCloseCreateFolderPanel()
+  } catch (error) {
+    createFolderError.value = error instanceof Error ? error.message : 'Failed to create folder.'
+  } finally {
+    isCreatingFolder.value = false
+  }
+}
+
+async function applyLaunchProjectPathFromUrl(): Promise<boolean> {
+  if (typeof window === 'undefined') return false
   const launchProjectPath = new URLSearchParams(window.location.search).get('openProjectPath')?.trim() ?? ''
-  if (!launchProjectPath) return
+  if (!launchProjectPath) return false
   try {
     const normalizedPath = await openProjectRoot(launchProjectPath, {
       createIfMissing: false,
       label: '',
     })
-    if (!normalizedPath) return
+    if (!normalizedPath) return false
     newThreadCwd.value = normalizedPath
     pinProjectToTop(getPathLeafName(normalizedPath))
     await router.replace({ name: 'home' })
@@ -1014,8 +2302,10 @@ async function applyLaunchProjectPathFromUrl(): Promise<void> {
     const nextUrl = new URL(window.location.href)
     nextUrl.searchParams.delete('openProjectPath')
     window.history.replaceState({}, '', nextUrl.toString())
+    return true
   } catch {
     // If launch path is invalid, keep normal startup behavior.
+    return false
   }
 }
 
@@ -1032,13 +2322,6 @@ async function resolveProjectBaseDirectory(): Promise<string> {
     // Fallback handled by empty return.
   }
   return ''
-}
-
-function looksLikePath(value: string): boolean {
-  if (!value) return false
-  if (value.startsWith('~/')) return true
-  if (value.startsWith('/')) return true
-  return /^[a-zA-Z]:[\\/]/.test(value)
 }
 
 async function refreshDefaultProjectName(): Promise<void> {
@@ -1084,6 +2367,31 @@ async function loadWorkspaceRootOptionsState(): Promise<void> {
   }
 }
 
+async function loadExistingFolderListing(path: string): Promise<void> {
+  const requestId = ++existingFolderBrowseRequestId
+  existingFolderBrowsePath.value = normalizePathForUi(path).trim()
+  existingFolderError.value = ''
+  isExistingFolderLoading.value = true
+
+  try {
+    const listing = await listLocalDirectories(path, { showHidden: showHiddenFolders.value })
+    if (requestId !== existingFolderBrowseRequestId) return
+    existingFolderBrowsePath.value = listing.path
+    existingFolderParentPath.value = listing.parentPath
+    existingFolderEntries.value = listing.entries
+  } catch (error) {
+    if (requestId !== existingFolderBrowseRequestId) return
+    existingFolderError.value = error instanceof Error ? error.message : 'Failed to load local folders.'
+    existingFolderParentPath.value = getPathParent(existingFolderBrowsePath.value)
+    existingFolderEntries.value = []
+    onCloseCreateFolderPanel()
+  } finally {
+    if (requestId === existingFolderBrowseRequestId) {
+      isExistingFolderLoading.value = false
+    }
+  }
+}
+
 async function loadTrendingProjects(): Promise<void> {
   isTrendingProjectsLoading.value = true
   try {
@@ -1095,10 +2403,64 @@ async function loadTrendingProjects(): Promise<void> {
   }
 }
 function joinPath(parent: string, child: string): string {
-  const normalizedParent = parent.trim().replace(/\/+$/, '')
-  const normalizedChild = child.trim().replace(/^\/+/, '')
-  if (!normalizedParent || !normalizedChild) return ''
-  return `${normalizedParent}/${normalizedChild}`
+  const rawParent = normalizePathForUi(parent).trim()
+  const normalizedChild = normalizePathForUi(child).trim().replace(/^[\\/]+/u, '')
+  if (!rawParent || !normalizedChild) return ''
+  const separator = rawParent.includes('\\') && !rawParent.includes('/') ? '\\' : '/'
+  if (/^[a-zA-Z]:[\\/]?$/u.test(rawParent)) {
+    return `${rawParent.slice(0, 2)}${separator}${normalizedChild}`
+  }
+  if (/^\/+$/u.test(rawParent)) {
+    return `/${normalizedChild}`
+  }
+  const normalizedParent = rawParent.replace(/[\\/]+$/u, '')
+  if (!normalizedParent) return ''
+  return `${normalizedParent}${separator}${normalizedChild}`
+}
+
+function normalizeAbsolutePath(value: string): string {
+  const normalizedValue = normalizePathForUi(value).trim()
+  if (!normalizedValue) return ''
+
+  const uncMatch = normalizedValue.match(/^\\\\([^\\/]+)[\\/]+([^\\/]+)([\\/].*)?$/u)
+  if (uncMatch) {
+    const [, server, share, suffix = ''] = uncMatch
+    const segments = collapsePathSegments(suffix.split(/[\\/]+/u))
+    return segments.length > 0
+      ? `\\\\${server}\\${share}\\${segments.join('\\')}`
+      : `\\\\${server}\\${share}`
+  }
+
+  const driveMatch = normalizedValue.match(/^([a-zA-Z]:)([\\/].*)?$/u)
+  if (driveMatch) {
+    const [, drive, suffix = ''] = driveMatch
+    const separator = normalizedValue.includes('\\') && !normalizedValue.includes('/') ? '\\' : '/'
+    const segments = collapsePathSegments(suffix.split(/[\\/]+/u))
+    return segments.length > 0 ? `${drive}${separator}${segments.join(separator)}` : `${drive}${separator}`
+  }
+
+  if (normalizedValue.startsWith('/')) {
+    const segments = collapsePathSegments(normalizedValue.split('/'))
+    return segments.length > 0 ? `/${segments.join('/')}` : '/'
+  }
+
+  return normalizedValue
+}
+
+function collapsePathSegments(rawSegments: readonly string[]): string[] {
+  const segments: string[] = []
+  for (const rawSegment of rawSegments) {
+    const segment = rawSegment.trim()
+    if (!segment || segment === '.') continue
+    if (segment === '..') {
+      if (segments.length > 0) {
+        segments.pop()
+      }
+      continue
+    }
+    segments.push(segment)
+  }
+  return segments
 }
 
 function onSelectModel(modelId: string): void {
@@ -1117,14 +2479,23 @@ function onInterruptTurn(): void {
   void interruptSelectedThreadTurn()
 }
 
-function onRollback(payload: { turnIndex: number; prependText?: string }): void {
-  const prependText = payload.prependText?.trim() ?? ''
-  if (prependText.length > 0) {
-    rollbackDraftPrependRequestId += 1
-    rollbackDraftPrependRequest.value = { id: rollbackDraftPrependRequestId, text: prependText }
+function onRollback(payload: { turnId: string }): void {
+  const targetTurnId = payload.turnId.trim()
+  if (targetTurnId.length > 0) {
+    const rollbackUserMessage = [...filteredMessages.value]
+      .reverse()
+      .find((message) => (
+        message.role === 'user'
+        && (message.turnId?.trim() ?? '') === targetTurnId
+        && message.text.trim().length > 0
+      ))
+    if (rollbackUserMessage?.text && threadComposerRef.value) {
+      threadComposerRef.value.appendTextToDraft(rollbackUserMessage.text)
+    }
   }
-  void rollbackSelectedThread(payload.turnIndex)
+  void rollbackSelectedThread(payload.turnId)
 }
+
 
 function onExportChat(): void {
   if (isHomeRoute.value || isSkillsRoute.value || typeof document === 'undefined') return
@@ -1234,6 +2605,12 @@ function loadInProgressSendModePref(): 'steer' | 'queue' {
   return v === 'queue' ? 'queue' : 'steer'
 }
 
+function loadChatWidthPref(): ChatWidthMode {
+  if (typeof window === 'undefined') return 'standard'
+  const value = window.localStorage.getItem(CHAT_WIDTH_KEY)
+  return value === 'standard' || value === 'wide' || value === 'extra-wide' ? value : 'standard'
+}
+
 function toggleSendWithEnter(): void {
   sendWithEnter.value = !sendWithEnter.value
   window.localStorage.setItem(SEND_WITH_ENTER_KEY, sendWithEnter.value ? '1' : '0')
@@ -1252,6 +2629,13 @@ function cycleDarkMode(): void {
   applyDarkMode()
 }
 
+function cycleChatWidth(): void {
+  const order: ChatWidthMode[] = ['standard', 'wide', 'extra-wide']
+  const idx = order.indexOf(chatWidth.value)
+  chatWidth.value = order[(idx + 1) % order.length]
+  window.localStorage.setItem(CHAT_WIDTH_KEY, chatWidth.value)
+}
+
 function toggleDictationClickToToggle(): void {
   dictationClickToToggle.value = !dictationClickToToggle.value
   window.localStorage.setItem(DICTATION_CLICK_TO_TOGGLE_KEY, dictationClickToToggle.value ? '1' : '0')
@@ -1262,14 +2646,101 @@ function toggleDictationAutoSend(): void {
   window.localStorage.setItem(DICTATION_AUTO_SEND_KEY, dictationAutoSend.value ? '1' : '0')
 }
 
-function toggleWorktreeGitAutomation(): void {
-  worktreeGitAutomationEnabled.value = !worktreeGitAutomationEnabled.value
-  window.localStorage.setItem(WORKTREE_GIT_AUTOMATION_KEY, worktreeGitAutomationEnabled.value ? '1' : '0')
-}
 
 function toggleGithubTrendingProjects(): void {
   showGithubTrendingProjects.value = !showGithubTrendingProjects.value
   window.localStorage.setItem(GITHUB_TRENDING_PROJECTS_KEY, showGithubTrendingProjects.value ? '1' : '0')
+}
+
+async function onProviderChange(provider: string): Promise<void> {
+  if (freeModeLoading.value) return
+  freeModeLoading.value = true
+  try {
+    if (provider === 'codex') {
+      selectedProvider.value = 'codex'
+      const result = await setFreeMode(false)
+      freeModeEnabled.value = result.enabled
+    } else if (provider === 'openrouter') {
+      selectedProvider.value = 'openrouter'
+      const result = await setFreeMode(true)
+      freeModeEnabled.value = result.enabled
+    } else if (provider === 'custom') {
+      selectedProvider.value = 'custom'
+    }
+    await refreshAll({ includeSelectedThreadMessages: false })
+  } catch {
+    // Silently fail — state unchanged
+  } finally {
+    freeModeLoading.value = false
+  }
+}
+
+async function saveCustomEndpoint(): Promise<void> {
+  if (freeModeCustomKeySaving.value) return
+  const url = customEndpointUrl.value.trim()
+  if (!url) return
+  freeModeCustomKeySaving.value = true
+  try {
+    await setCustomProvider(url, customEndpointKey.value.trim())
+    freeModeEnabled.value = true
+    await refreshAll({ includeSelectedThreadMessages: false })
+  } catch {
+    // Silently fail
+  } finally {
+    freeModeCustomKeySaving.value = false
+  }
+}
+
+async function saveFreeModeCustomKey(): Promise<void> {
+  if (freeModeCustomKeySaving.value) return
+  freeModeCustomKeySaving.value = true
+  try {
+    const key = freeModeCustomKey.value.trim()
+    await setFreeModeCustomKey(key)
+    freeModeCustomKey.value = ''
+    await loadFreeModeStatus()
+    await refreshAll({ includeSelectedThreadMessages: false })
+  } catch {
+    // Silently fail
+  } finally {
+    freeModeCustomKeySaving.value = false
+  }
+}
+
+async function clearFreeModeCustomKey(): Promise<void> {
+  if (freeModeCustomKeySaving.value) return
+  freeModeCustomKeySaving.value = true
+  try {
+    await setFreeModeCustomKey('')
+    freeModeCustomKey.value = ''
+    await loadFreeModeStatus()
+    await refreshAll({ includeSelectedThreadMessages: false })
+  } catch {
+    // Silently fail
+  } finally {
+    freeModeCustomKeySaving.value = false
+  }
+}
+
+async function loadFreeModeStatus(): Promise<void> {
+  try {
+    const status = await getFreeModeStatus()
+    freeModeEnabled.value = status.enabled
+    freeModeHasCustomKey.value = status.customKey ?? false
+    freeModeCustomKeyMasked.value = status.maskedKey ?? null
+    if (status.enabled) {
+      if (status.provider === 'custom') {
+        selectedProvider.value = 'custom'
+        customEndpointUrl.value = status.customBaseUrl ?? ''
+      } else {
+        selectedProvider.value = 'openrouter'
+      }
+    } else {
+      selectedProvider.value = 'codex'
+    }
+  } catch {
+    // Ignore — free mode status unknown
+  }
 }
 
 function onDictationLanguageChange(nextValue: string): void {
@@ -1356,6 +2827,22 @@ function saveSidebarCollapsed(value: boolean): void {
   window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, value ? '1' : '0')
 }
 
+function loadAccountsSectionCollapsed(): boolean {
+  if (typeof window === 'undefined') return true
+  const value = window.localStorage.getItem(ACCOUNTS_SECTION_COLLAPSED_STORAGE_KEY)
+  if (value === null) return true
+  return value === '1'
+}
+
+function toggleAccountsSectionCollapsed(): void {
+  isAccountsSectionCollapsed.value = !isAccountsSectionCollapsed.value
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem(
+    ACCOUNTS_SECTION_COLLAPSED_STORAGE_KEY,
+    isAccountsSectionCollapsed.value ? '1' : '0',
+  )
+}
+
 function normalizeMessageType(rawType: string | undefined, role: string): string {
   const normalized = (rawType ?? '').trim()
   if (normalized.length > 0) {
@@ -1364,39 +2851,61 @@ function normalizeMessageType(rawType: string | undefined, role: string): string
   return role.trim() || 'message'
 }
 
+function onSelectCollaborationMode(mode: 'default' | 'plan'): void {
+  setSelectedCollaborationMode(mode)
+}
+
 async function initialize(): Promise<void> {
-  await refreshAll()
+  await router.isReady()
+
+  if (route.name === 'thread' && routeThreadId.value) {
+    primeSelectedThread(routeThreadId.value)
+  }
+
+  startPolling()
+  await refreshAll({
+    includeSelectedThreadMessages: true,
+  })
+  void loadAccountsState({ silent: true })
+  await applyLaunchProjectPathFromUrl()
   hasInitialized.value = true
   await syncThreadSelectionWithRoute()
-  startPolling()
 }
 
 async function syncThreadSelectionWithRoute(): Promise<void> {
-  if (isRouteSyncInProgress.value) return
+  if (isRouteSyncInProgress.value) {
+    hasPendingRouteSync = true
+    return
+  }
   isRouteSyncInProgress.value = true
 
   try {
-    if (route.name === 'home' || route.name === 'skills') {
-      if (selectedThreadId.value !== '') {
-        await selectThread('')
-      }
-      return
-    }
+    do {
+      hasPendingRouteSync = false
 
-    if (route.name === 'thread') {
-      const threadId = routeThreadId.value
-      if (!threadId) return
-
-      if (!knownThreadIdSet.value.has(threadId)) {
-        await router.replace({ name: 'home' })
-        return
+      if (route.name === 'home' || route.name === 'skills') {
+        if (selectedThreadId.value !== '') {
+          await selectThread('')
+        }
+        continue
       }
 
-      if (selectedThreadId.value !== threadId) {
-        await selectThread(threadId)
+      if (route.name === 'thread') {
+        const threadId = routeThreadId.value
+        if (!threadId) continue
+
+        if (!knownThreadIdSet.value.has(threadId)) {
+          await router.replace({ name: 'home' })
+          continue
+        }
+
+        if (selectedThreadId.value !== threadId) {
+          await selectThread(threadId)
+        } else {
+          void ensureThreadMessagesLoaded(threadId, { silent: true })
+        }
       }
-      return
-    }
+    } while (hasPendingRouteSync)
 
   } finally {
     isRouteSyncInProgress.value = false
@@ -1457,6 +2966,16 @@ watch(
 )
 
 watch(
+  () => [hasInitialized.value, route.name, selectedThreadId.value] as const,
+  ([ready, routeName, threadId]) => {
+    if (!ready) return
+    if (routeName !== 'thread') return
+    if (!threadId) return
+    void ensureThreadMessagesLoaded(threadId, { silent: true })
+  },
+)
+
+watch(
   () => newThreadFolderOptions.value,
   (options) => {
     if (options.length === 0) {
@@ -1481,6 +3000,15 @@ watch(
 )
 
 watch(
+  () => [newThreadRuntime.value, newThreadCwd.value] as const,
+  ([runtime, cwd]) => {
+    if (runtime !== 'worktree') return
+    void loadWorktreeBranches(cwd)
+  },
+  { immediate: true },
+)
+
+watch(
   () => newThreadRuntime.value,
   (runtime) => {
     if (runtime === 'local') {
@@ -1493,7 +3021,9 @@ watch(
           newThreadCwd.value = localCwd
         }
       }
+      return
     }
+    void loadWorktreeBranches(newThreadCwd.value)
   },
 )
 
@@ -1502,6 +3032,9 @@ watch(
   (name) => {
     if (name !== 'home') {
       worktreeInitStatus.value = { phase: 'idle', title: '', message: '' }
+    }
+    if (name !== 'thread') {
+      isReviewPaneOpen.value = false
     }
   },
 )
@@ -1514,6 +3047,19 @@ watch(
 )
 
 watch(
+  () => [route.name, composerCwd.value] as const,
+  ([routeName, cwd]) => {
+    if (routeName !== 'thread') {
+      threadBranchOptions.value = []
+      currentThreadBranch.value = null
+      return
+    }
+    void loadThreadBranches(cwd)
+  },
+  { immediate: true },
+)
+
+watch(
   pageTitle,
   (value) => {
     if (typeof document === 'undefined') return
@@ -1522,13 +3068,6 @@ watch(
   { immediate: true },
 )
 
-watch(
-  () => worktreeGitAutomationEnabled.value,
-  (enabled) => {
-    setWorktreeGitAutomationEnabled(enabled)
-  },
-  { immediate: true },
-)
 
 watch(isMobile, (mobile) => {
   if (mobile && !isSidebarCollapsed.value) {
@@ -1552,7 +3091,7 @@ async function submitFirstMessageForNewThread(
         message: 'Creating a worktree and running setup.',
       }
       try {
-        const created = await createWorktree(newThreadCwd.value)
+        const created = await createWorktree(newThreadCwd.value, newWorktreeBaseBranch.value)
         targetCwd = created.cwd
         newThreadCwd.value = created.cwd
         worktreeInitStatus.value = { phase: 'idle', title: '', message: '' }
@@ -1568,8 +3107,35 @@ async function submitFirstMessageForNewThread(
     const threadId = await sendMessageToNewThread(text, targetCwd, imageUrls, skills, fileAttachments)
     if (!threadId) return
     await router.replace({ name: 'thread', params: { threadId } })
+    scheduleMobileConversationJumpToLatest()
   } catch {
     // Error is already reflected in state.
+  }
+}
+
+async function loadWorktreeBranches(sourceCwd: string): Promise<void> {
+  const normalizedSourceCwd = sourceCwd.trim()
+  if (!normalizedSourceCwd) {
+    worktreeBranchOptions.value = []
+    newWorktreeBaseBranch.value = ''
+    return
+  }
+
+  isLoadingWorktreeBranches.value = true
+  try {
+    const options = await getWorktreeBranchOptions(normalizedSourceCwd)
+    worktreeBranchOptions.value = options
+    const currentSelection = newWorktreeBaseBranch.value.trim()
+    const hasCurrentSelection = currentSelection.length > 0 && options.some((option) => option.value === currentSelection)
+    if (!hasCurrentSelection) {
+      const preferredMainOption = options.find((option) => option.value.trim() === 'main')
+      newWorktreeBaseBranch.value = preferredMainOption?.value ?? options[0]?.value ?? ''
+    }
+  } catch {
+    worktreeBranchOptions.value = []
+    newWorktreeBaseBranch.value = ''
+  } finally {
+    isLoadingWorktreeBranches.value = false
   }
 }
 </script>
@@ -1591,7 +3157,7 @@ async function submitFirstMessageForNewThread(
 }
 
 .content-root {
-  @apply h-full min-h-0 w-full flex flex-col overflow-y-hidden overflow-x-visible bg-white;
+  @apply h-full min-h-0 min-w-0 w-full flex flex-col overflow-y-hidden overflow-x-hidden bg-white;
 }
 
 .sidebar-thread-controls-host {
@@ -1643,8 +3209,9 @@ async function submitFirstMessageForNewThread(
 }
 
 .content-body {
-  @apply flex-1 min-h-0 w-full flex flex-col gap-2 sm:gap-3 pt-1 pb-2 sm:pb-4 overflow-y-hidden overflow-x-visible;
+  @apply flex-1 min-h-0 min-w-0 w-full flex flex-col gap-2 sm:gap-3 pt-1 pb-2 sm:pb-4 overflow-x-hidden;
 }
+
 
 
 .content-error {
@@ -1655,12 +3222,37 @@ async function submitFirstMessageForNewThread(
   @apply flex-1 min-h-0 flex flex-col gap-3;
 }
 
+.content-grid-home {
+  @apply overflow-y-auto;
+}
+
 .content-thread {
   @apply flex-1 min-h-0;
 }
 
 .composer-with-queue {
-  @apply w-full;
+  @apply w-full shrink-0 px-2 sm:px-6;
+}
+
+.content-header-branch-dropdown :deep(.composer-dropdown-trigger) {
+  @apply rounded-full border border-zinc-200 bg-white px-3 py-1.5 text-xs text-zinc-700 transition hover:bg-zinc-50;
+}
+
+.content-header-branch-dropdown :deep(.composer-dropdown-value) {
+  @apply max-w-40 truncate;
+}
+
+.content-header-branch-dropdown :deep(.composer-dropdown-menu-wrap) {
+  left: auto;
+  right: 0;
+}
+
+.content-header-branch-dropdown.is-review-open :deep(.composer-dropdown-trigger) {
+  @apply border-zinc-900 bg-zinc-900 text-white hover:bg-zinc-800;
+}
+
+.content-header-branch-dropdown.is-review-open :deep(.composer-dropdown-chevron) {
+  @apply text-white;
 }
 
 .new-thread-empty {
@@ -1676,7 +3268,7 @@ async function submitFirstMessageForNewThread(
 }
 
 .new-thread-folder-dropdown :deep(.composer-dropdown-trigger) {
-  @apply h-auto text-2xl sm:text-[2.5rem] leading-[1.05];
+  @apply h-auto p-0 text-2xl sm:text-[2.5rem] leading-[1.05];
 }
 
 .new-thread-folder-dropdown :deep(.composer-dropdown-value) {
@@ -1687,8 +3279,197 @@ async function submitFirstMessageForNewThread(
   @apply h-4 w-4 sm:h-5 sm:w-5 mt-0;
 }
 
+.new-thread-folder-selected {
+  @apply mt-2 mb-0 max-w-3xl text-center text-xs text-zinc-500 break-all;
+}
+
+.new-thread-folder-actions {
+  @apply mt-3 flex w-full max-w-3xl flex-wrap items-center justify-center gap-2;
+}
+
+.new-thread-folder-action {
+  @apply inline-flex h-9 items-center justify-center rounded-full border border-zinc-200 bg-white px-4 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-default disabled:opacity-60;
+}
+
+.new-thread-folder-action-primary {
+  @apply border-zinc-900 bg-zinc-900 text-white hover:bg-zinc-800;
+}
+
+.new-thread-open-folder-overlay {
+  @apply fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4;
+}
+
+.new-thread-open-folder {
+  @apply flex w-full max-w-3xl max-h-[90vh] flex-col gap-2 overflow-y-auto rounded-2xl border border-zinc-200 bg-white px-4 py-4 text-left shadow-xl;
+}
+
+.new-thread-open-folder-header {
+  @apply flex items-center justify-between gap-3;
+}
+
+.new-thread-open-folder-title {
+  @apply m-0 text-sm font-semibold text-zinc-900;
+}
+
+.new-thread-open-folder-close {
+  @apply border-0 bg-transparent p-0 text-sm text-zinc-500 transition hover:text-zinc-800;
+}
+
+.new-thread-open-folder-label {
+  @apply m-0 text-xs font-medium uppercase tracking-wide text-zinc-500;
+}
+
+.new-thread-open-folder-current {
+  @apply flex items-start gap-2;
+}
+
+.new-thread-open-folder-path {
+  @apply m-0 min-w-0 flex-1 rounded-xl bg-zinc-100 px-3 py-2 font-mono text-xs text-zinc-700 break-all;
+}
+
+.new-thread-open-folder-actions {
+  @apply flex flex-wrap items-center gap-2;
+}
+
+.new-thread-open-folder-toggle {
+  @apply inline-flex items-center gap-2 text-sm text-zinc-600;
+}
+
+.new-thread-open-folder-toggle-input {
+  @apply relative h-4 w-4 shrink-0 appearance-none rounded-[4px] border border-zinc-300 bg-white outline-none transition;
+}
+
+.new-thread-open-folder-toggle-input:focus-visible {
+  box-shadow: 0 0 0 3px rgb(228 228 231);
+}
+
+.new-thread-open-folder-toggle-input:checked {
+  border-color: rgb(24 24 27);
+  background-color: rgb(255 255 255);
+}
+
+.new-thread-open-folder-toggle-input::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 1px;
+  width: 4px;
+  height: 8px;
+  border-right: 2px solid rgb(24 24 27);
+  border-bottom: 2px solid rgb(24 24 27);
+  transform: rotate(45deg);
+  opacity: 0;
+}
+
+.new-thread-open-folder-toggle-input:checked::after {
+  opacity: 1;
+}
+
+.new-thread-open-folder-filter {
+  @apply w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 outline-none transition focus:border-zinc-400;
+}
+
+.new-thread-open-folder-create {
+  @apply flex flex-col gap-2;
+}
+
+.new-thread-open-folder-create-composer {
+  @apply flex items-center gap-2;
+}
+
+.new-thread-open-folder-create-input {
+  @apply w-full min-w-0 flex-1 rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 outline-none transition focus:border-zinc-400;
+}
+
+.new-thread-open-folder-create-submit {
+  @apply shrink-0;
+}
+
+.new-thread-folder-action[aria-pressed='true'] {
+  @apply border-zinc-900 bg-zinc-900 text-white hover:bg-zinc-800;
+}
+
+.new-thread-open-folder-status {
+  @apply m-0 rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-600;
+}
+
+.new-thread-open-folder-error {
+  @apply m-0 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700;
+}
+
+.new-thread-open-folder-error-actions {
+  @apply flex flex-wrap items-start gap-2;
+}
+
+.new-thread-open-folder-list {
+  @apply m-0 flex max-h-72 list-none flex-col gap-1 overflow-y-auto p-0 pr-3;
+  scrollbar-gutter: stable;
+  scrollbar-color: rgb(161 161 170) rgb(244 244 245);
+  scrollbar-width: thin;
+}
+
+.new-thread-open-folder-list::-webkit-scrollbar {
+  width: 10px;
+}
+
+.new-thread-open-folder-list::-webkit-scrollbar-track {
+  background: rgb(244 244 245);
+  border-radius: 9999px;
+}
+
+.new-thread-open-folder-list::-webkit-scrollbar-thumb {
+  background: rgb(161 161 170);
+  border-radius: 9999px;
+  border: 2px solid rgb(244 244 245);
+}
+
+.new-thread-open-folder-list::-webkit-scrollbar-thumb:hover {
+  background: rgb(113 113 122);
+}
+
+.new-thread-open-folder-item {
+  @apply grid grid-cols-[minmax(0,1fr)_auto] items-center gap-1;
+}
+
+.new-thread-open-folder-item-main {
+  @apply min-w-0 truncate rounded-xl border border-zinc-200 bg-zinc-50 px-2.5 py-1 text-left text-sm font-medium leading-5 text-zinc-900 transition hover:border-zinc-300 hover:bg-zinc-100;
+}
+
+.new-thread-open-folder-item-main:disabled,
+.new-thread-open-folder-item-open:disabled {
+  @apply cursor-default opacity-60;
+}
+
+.new-thread-open-folder-item-name {
+  @apply block truncate;
+}
+
+.new-thread-open-folder-item-open {
+  @apply inline-flex h-7 items-center justify-center rounded-xl border border-zinc-200 bg-white px-2.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-50;
+}
+
 .new-thread-runtime-dropdown {
   @apply mt-3;
+}
+
+.new-thread-branch-select {
+  @apply mt-3 w-full max-w-3xl;
+}
+
+.new-thread-branch-select-label {
+  @apply m-0 mb-1 text-xs font-medium uppercase tracking-wide text-zinc-500;
+}
+
+.new-thread-branch-dropdown :deep(.composer-dropdown-trigger) {
+  @apply h-9 rounded-xl border border-zinc-200 bg-white px-3 text-sm text-zinc-700;
+}
+
+.new-thread-branch-select-help {
+  @apply mt-1 mb-0 text-xs text-zinc-500;
+}
+
+.new-thread-runtime-help {
+  @apply mt-2 mb-0 max-w-3xl text-center text-xs text-zinc-500;
 }
 
 .new-thread-trending {
@@ -1784,12 +3565,16 @@ async function submitFirstMessageForNewThread(
   @apply flex items-center gap-2 w-full rounded-lg border-0 bg-transparent px-2 py-2 text-sm text-zinc-600 transition hover:bg-zinc-200 hover:text-zinc-900 cursor-pointer;
 }
 
+.sidebar-settings-button-version {
+  @apply ml-auto min-w-0 truncate text-right text-xs;
+}
+
 .sidebar-settings-icon {
   @apply w-4.5 h-4.5;
 }
 
 .sidebar-settings-panel {
-  @apply mb-1 rounded-lg border border-zinc-200 bg-white overflow-hidden;
+  @apply mb-1 max-h-[min(70vh,36rem)] overflow-y-auto rounded-lg border border-zinc-200 bg-white;
 }
 
 .sidebar-settings-row {
@@ -1816,6 +3601,151 @@ async function submitFirstMessageForNewThread(
   @apply border-t border-zinc-100;
 }
 
+.sidebar-settings-telegram-panel {
+  @apply border-t border-zinc-100 bg-zinc-50/70 px-3 py-3;
+}
+
+.sidebar-settings-field {
+  @apply flex flex-col gap-1.5;
+}
+
+.sidebar-settings-field + .sidebar-settings-field {
+  @apply mt-3;
+}
+
+.sidebar-settings-field-label {
+  @apply text-xs font-medium text-zinc-700;
+}
+
+.sidebar-settings-input,
+.sidebar-settings-textarea {
+  @apply w-full rounded-md border border-zinc-200 bg-white px-2.5 py-2 text-sm text-zinc-800 outline-none transition focus:border-zinc-400 focus:ring-2 focus:ring-zinc-200;
+}
+
+.sidebar-settings-textarea {
+  @apply min-h-20 resize-y font-mono text-xs;
+}
+
+.sidebar-settings-field-help {
+  @apply mt-2 text-xs leading-5 text-zinc-500;
+}
+
+.sidebar-settings-telegram-error {
+  @apply mt-2 rounded-md bg-rose-50 px-2.5 py-2 text-xs text-rose-700;
+}
+
+.sidebar-settings-telegram-actions {
+  @apply mt-3 flex items-center justify-end;
+}
+
+.sidebar-settings-telegram-save {
+  @apply rounded-full border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-default disabled:opacity-60;
+}
+
+.sidebar-settings-account-section {
+  @apply border-t border-zinc-100 bg-zinc-50/60 px-3 py-3;
+}
+
+.sidebar-settings-account-header {
+  @apply mb-2 flex items-center justify-between gap-2;
+}
+
+.sidebar-settings-account-header-main {
+  @apply flex items-center gap-2;
+}
+
+.sidebar-settings-account-collapse {
+  @apply inline-flex h-5 w-5 items-center justify-center rounded border border-zinc-200 bg-white text-zinc-600 transition hover:bg-zinc-100;
+}
+
+.sidebar-settings-account-collapse-icon {
+  @apply text-[11px] leading-none;
+}
+
+.sidebar-settings-account-title {
+  @apply text-sm font-medium text-zinc-800;
+}
+
+.sidebar-settings-account-count {
+  @apply rounded bg-zinc-200 px-1.5 py-0.5 text-[11px] text-zinc-600;
+}
+
+.sidebar-settings-account-error {
+  @apply mb-2 rounded-md bg-rose-50 px-2 py-1.5 text-xs text-rose-700;
+}
+
+.sidebar-settings-account-refresh {
+  @apply shrink-0 rounded-full border border-zinc-200 bg-white px-2.5 py-1 text-xs text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-default disabled:opacity-60;
+}
+
+.sidebar-settings-account-empty {
+  @apply text-xs text-zinc-500;
+}
+
+.sidebar-settings-account-list {
+  @apply flex flex-col gap-2;
+}
+
+.sidebar-settings-account-item {
+  @apply flex items-center gap-2 rounded-lg border border-zinc-200 bg-white px-2.5 py-2;
+}
+
+.sidebar-settings-account-item.is-active {
+  @apply border-emerald-200 bg-emerald-50;
+}
+
+.sidebar-settings-account-item.is-unavailable {
+  @apply border-rose-200 bg-rose-50;
+}
+
+.sidebar-settings-account-main {
+  @apply min-w-0 flex-1;
+}
+
+.sidebar-settings-account-actions {
+  @apply flex w-24 shrink-0 flex-col items-end gap-1.5;
+}
+
+.sidebar-settings-account-email {
+  @apply truncate text-sm text-zinc-800;
+}
+
+.sidebar-settings-account-meta {
+  @apply truncate text-[11px] text-zinc-500;
+}
+
+.sidebar-settings-account-quota {
+  @apply truncate text-[11px] text-zinc-600;
+}
+
+.sidebar-settings-account-id {
+  @apply mt-1 inline-flex max-w-full rounded-full bg-zinc-100 px-2 py-0.5 font-mono text-[11px] text-zinc-700;
+}
+
+.sidebar-settings-account-item.is-active .sidebar-settings-account-id {
+  @apply bg-emerald-100 text-emerald-800;
+}
+
+.sidebar-settings-account-item.is-unavailable .sidebar-settings-account-id {
+  @apply bg-rose-100 text-rose-800;
+}
+
+.sidebar-settings-account-switch {
+  @apply min-w-[4.75rem] shrink-0 rounded-full border border-zinc-200 bg-white px-2.5 py-1 text-center text-xs text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-default disabled:opacity-60;
+}
+
+.sidebar-settings-account-remove {
+  @apply invisible shrink-0 rounded-full border border-amber-200 bg-white px-2 py-0.5 text-[10px] leading-4 text-zinc-500 opacity-0 pointer-events-none transition-colors hover:bg-amber-50 disabled:cursor-default disabled:opacity-60;
+}
+
+.sidebar-settings-account-remove.is-visible {
+  @apply visible opacity-100 pointer-events-auto;
+}
+
+.sidebar-settings-account-remove.is-confirming {
+  @apply border-amber-300 bg-amber-50 text-amber-700 font-medium;
+}
+
 .sidebar-settings-label {
   @apply text-left;
 }
@@ -1823,6 +3753,7 @@ async function submitFirstMessageForNewThread(
 .sidebar-settings-value {
   @apply text-xs text-zinc-500 bg-zinc-100 rounded px-1.5 py-0.5;
 }
+
 
 .sidebar-settings-toggle {
   @apply relative w-9 h-5 rounded-full bg-zinc-300 transition-colors shrink-0;
@@ -1841,6 +3772,82 @@ async function submitFirstMessageForNewThread(
   transform: translateX(16px);
 }
 
+.sidebar-settings-row--input {
+  @apply flex flex-col gap-1 py-1.5;
+}
+
+.sidebar-settings-key-group {
+  @apply flex items-center gap-1.5 w-full;
+}
+
+.sidebar-settings-key-input {
+  @apply flex-1 min-w-0 text-xs rounded border border-zinc-200 bg-white px-2 py-1 outline-none transition-colors placeholder:text-zinc-400;
+}
+
+.sidebar-settings-key-input:focus {
+  @apply border-zinc-400;
+}
+
+.sidebar-settings-key-save {
+  @apply shrink-0 rounded border border-zinc-200 bg-white px-2.5 py-1 text-xs text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-40 disabled:cursor-default;
+}
+
+.sidebar-settings-key-masked {
+  @apply flex-1 min-w-0 text-xs text-zinc-500 font-mono truncate;
+}
+
+.sidebar-settings-key-clear {
+  @apply shrink-0 w-6 h-6 flex items-center justify-center rounded-full border border-zinc-200 text-xs text-zinc-400 transition-colors hover:text-zinc-600 hover:border-zinc-300 disabled:opacity-40;
+}
+
+.sidebar-settings-provider-select {
+  @apply min-w-0 max-w-40 rounded-md border border-zinc-200 bg-white px-2 py-1 text-xs text-zinc-700 outline-none transition-colors cursor-pointer;
+}
+
+.sidebar-settings-provider-select:focus {
+  @apply border-zinc-400 ring-2 ring-zinc-200;
+}
+
+.sidebar-settings-provider-info {
+  @apply flex items-center justify-between w-full;
+}
+
+.sidebar-settings-provider-link {
+  @apply text-xs text-blue-600 hover:text-blue-700 underline shrink-0;
+}
+
+:root.dark .sidebar-settings-provider-select {
+  @apply border-zinc-600 bg-zinc-800 text-zinc-200;
+}
+
+:root.dark .sidebar-settings-provider-select:focus {
+  @apply border-zinc-500 ring-zinc-700;
+}
+
+:root.dark .sidebar-settings-provider-link {
+  @apply text-blue-400 hover:text-blue-300;
+}
+
+:root.dark .sidebar-settings-key-input {
+  @apply border-zinc-600 bg-zinc-800 text-zinc-200 placeholder:text-zinc-500;
+}
+
+:root.dark .sidebar-settings-key-input:focus {
+  @apply border-zinc-500;
+}
+
+:root.dark .sidebar-settings-key-save {
+  @apply border-zinc-600 bg-zinc-700 text-zinc-200 hover:bg-zinc-600;
+}
+
+:root.dark .sidebar-settings-key-masked {
+  @apply text-zinc-400;
+}
+
+:root.dark .sidebar-settings-key-clear {
+  @apply border-zinc-600 text-zinc-500 hover:text-zinc-300 hover:border-zinc-500;
+}
+
 .settings-panel-enter-active,
 .settings-panel-leave-active {
   transition: all 150ms ease;
@@ -1850,6 +3857,30 @@ async function submitFirstMessageForNewThread(
 .settings-panel-leave-to {
   opacity: 0;
   transform: translateY(8px);
+}
+
+.sidebar-settings-context-row {
+  @apply cursor-default;
+}
+
+.sidebar-settings-context-value {
+  @apply text-xs font-semibold text-zinc-700 text-right;
+}
+
+.sidebar-settings-context-value[data-state='ok'] {
+  @apply text-emerald-700;
+}
+
+.sidebar-settings-context-value[data-state='warning'] {
+  @apply text-amber-700;
+}
+
+.sidebar-settings-context-value[data-state='danger'] {
+  @apply text-rose-700;
+}
+
+.sidebar-settings-context-meta {
+  @apply block text-[11px] font-normal text-zinc-500;
 }
 
 .sidebar-settings-rate-limits {

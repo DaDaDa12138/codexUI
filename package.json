@@ -1,6 +1,6 @@
 {
   "name": "codexapp",
-  "version": "0.1.58",
+  "version": "0.1.78",
   "description": "A lightweight web interface for Codex that runs on top of the Codex app-server, allowing remote access from any browser",
   "type": "module",
   "license": "MIT",
@@ -12,6 +12,9 @@
   "homepage": "https://github.com/friuns2/codexui#readme",
   "bugs": {
     "url": "https://github.com/friuns2/codexui/issues"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "keywords": [
     "codex",
@@ -32,28 +35,31 @@
     "dist-cli/"
   ],
   "scripts": {
-    "dev": "vite",
-    "dev:open": "npm run build:cli && sh -c 'npm run dev & VPID=$!; node dist-cli/index.js --open-project \"${1:-.}\"; wait $VPID' --",
+    "dev": "pnpm install && CODEXUI_SANDBOX_MODE=danger-full-access CODEXUI_APPROVAL_POLICY=never vite",
+    "dev:open": "pnpm run build:cli && sh -c 'pnpm run dev & VPID=$!; node dist-cli/index.js --open-project \"${1:-.}\"; wait $VPID' --",
     "build:frontend": "vue-tsc --noEmit && vite build",
     "build:cli": "tsup",
-    "build": "npm run build:frontend && npm run build:cli",
+    "build": "pnpm run build:frontend && pnpm run build:cli",
     "preview": "vite preview",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "pnpm run build"
   },
   "dependencies": {
     "commander": "^13.1.0",
     "express": "^5.1.0",
     "firebase": "^12.2.1",
+    "highlight.js": "^11.11.1",
     "qrcode-terminal": "^0.12.0",
     "ws": "^8.18.3"
   },
   "devDependencies": {
+    "@playwright/test": "^1.59.1",
     "@tailwindcss/vite": "^4.1.18",
     "@types/express": "^5.0.0",
     "@types/node": "^22.13.2",
     "@types/qrcode-terminal": "^0.12.2",
     "@types/ws": "^8.18.1",
     "@vitejs/plugin-vue": "^5.2.1",
+    "playwright": "^1.59.1",
     "tailwindcss": "^4.1.18",
     "tsup": "^8.4.0",
     "typescript": "^5.7.3",

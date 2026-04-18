@@ -51,6 +51,12 @@ cloudflared tunnel --url http://localhost:<port>
 It prints the tunnel URL, terminal QR code, and password together in startup output.  
 Use `--no-tunnel` to disable this behavior.
 
+If you are using a provider or AI gateway that is already authenticated and do not want `codexapp` to force `codex login` during startup, use:
+
+```bash
+npx codexapp --no-login
+```
+
 ### Linux 🐧
 ```bash
 node -v   # should be 18+
@@ -90,8 +96,8 @@ If you want to use codexUI from iPhone or iPad Safari, serving it over HTTPS is 
 A practical private setup is to run codexUI locally and publish it inside your tailnet with Tailscale Serve:
 
 ```powershell
-npx codexapp --no-tunnel --port 5999
-tailscale serve --bg 5999
+npx codexapp --no-tunnel --port 5900
+tailscale serve --bg 5900
 ```
 
 Then open:
@@ -136,9 +142,18 @@ Set these environment variables before starting `codexapp`:
 
 ```bash
 export TELEGRAM_BOT_TOKEN="<your-telegram-bot-token>"
+export TELEGRAM_ALLOWED_USER_IDS="<your-telegram-user-id>,<optional-second-id>"
 export TELEGRAM_DEFAULT_CWD="$PWD" # optional, defaults to current working directory
 npx codexapp
 ```
+
+`TELEGRAM_ALLOWED_USER_IDS` is required for safe access. Only allowlisted Telegram user IDs can use the bridge. If no allowed user IDs are configured, incoming Telegram messages are rejected.
+
+To find your Telegram user ID:
+
+1. Send a message to your bot.
+2. Run `curl "https://api.telegram.org/bot<your-telegram-bot-token>/getUpdates"`.
+3. Read `message.from.id` from the returned update payload.
 
 Bot commands:
 
@@ -152,7 +167,7 @@ Bot commands:
 > **Not just launch. Actual UX upgrades.**
 
 - 🗂️ Searchable project picker in new-thread flow
-- ➕ Inline "Add new project" input inside picker (no browser prompt)
+- ➕ "Create Project" button next to "Select folder" with browser prompt
 - 📌 New projects get pinned to top automatically
 - 🧠 Smart default new-project name suggestion via server-side free-directory scan (`New Project (N)`)
 - 🔄 Project order persisted globally to workspace roots state
