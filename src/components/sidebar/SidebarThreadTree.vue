@@ -2,27 +2,50 @@
   <section class="thread-tree-root">
     <section v-if="pinnedThreads.length > 0" class="pinned-section">
       <ul class="thread-list">
-        <li v-for="thread in pinnedThreads" :key="thread.id" class="thread-row-item">
+        <li
+          v-for="thread in pinnedThreads"
+          :key="thread.id"
+          class="thread-row-item"
+          :data-menu-open="isThreadMenuOpen(thread.id) ? 'true' : 'false'"
+        >
           <SidebarMenuRow
             class="thread-row"
             :data-active="thread.id === selectedThreadId"
             :data-pinned="isPinned(thread.id)"
+            :data-menu-open="isThreadMenuOpen(thread.id) ? 'true' : 'false'"
             :force-right-hover="isThreadMenuOpen(thread.id)"
-            @mouseleave="onThreadRowLeave(thread.id)"
+            @click="onSelect(thread.id)"
+            @mouseleave="onThreadRowLeave(thread.id, $event)"
             @contextmenu="onThreadRowContextMenu($event, thread.id)"
           >
             <template #left>
               <span class="thread-left-stack">
-                <span v-if="thread.inProgress || thread.unread" class="thread-status-indicator" :data-state="getThreadState(thread)" />
-                <button class="thread-pin-button" type="button" title="pin" @click="togglePin(thread.id)">
+                <span v-if="shouldShowThreadIndicator(thread)" class="thread-status-indicator" :data-state="getThreadState(thread)" />
+                <button class="thread-pin-button" type="button" title="pin" @click.stop="togglePin(thread.id)">
                   <IconTablerPin class="thread-icon" />
                 </button>
               </span>
             </template>
-            <button class="thread-main-button" type="button" @click="onSelect(thread.id)">
+            <button class="thread-main-button" type="button" @click.stop="onSelect(thread.id)">
               <span class="thread-row-title-wrap">
-                <span class="thread-row-title">{{ thread.title }}</span>
-                <IconTablerGitFork v-if="thread.hasWorktree" class="thread-row-worktree-icon" title="Worktree thread" />
+                <span class="thread-row-title-line">
+                  <span class="thread-row-title">{{ thread.title }}</span>
+                  <IconTablerGitFork v-if="thread.hasWorktree" class="thread-row-worktree-icon" :title="t('Worktree thread')" />
+                  <span
+                    v-if="threadHasAutomation(thread.id)"
+                    class="thread-row-automation-chip"
+                    :title="threadAutomationTooltip(thread.id)"
+                  >
+                    Auto
+                  </span>
+                  <span
+                    v-if="thread.pendingRequestState"
+                    class="thread-row-request-chip"
+                    :data-state="thread.pendingRequestState"
+                  >
+                    {{ threadRequestLabel(thread) }}
+                  </span>
+                </span>
               </span>
             </button>
             <template #right>
@@ -38,23 +61,6 @@
                 >
                   <IconTablerDots class="thread-icon" />
                 </button>
-                <div v-if="isThreadMenuOpen(thread.id)" class="thread-menu-panel" @click.stop>
-                  <button class="thread-menu-item" type="button" @click="onBrowseThreadFiles(thread.id)">
-                    Browse files
-                  </button>
-                  <button class="thread-menu-item" type="button" @click="onExportThread(thread.id)">
-                    Export chat
-                  </button>
-                  <button class="thread-menu-item" type="button" @click="onForkThread(thread.id)">
-                    Create chat fork
-                  </button>
-                  <button class="thread-menu-item" type="button" @click="openRenameThreadDialog(thread.id, thread.title)">
-                    Rename thread
-                  </button>
-                  <button class="thread-menu-item thread-menu-item-danger" type="button" @click="openDeleteThreadDialog(thread.id, thread.title)">
-                    Delete thread
-                  </button>
-                </div>
               </div>
             </template>
           </SidebarMenuRow>
@@ -63,29 +69,29 @@
     </section>
 
     <SidebarMenuRow as="header" class="thread-tree-header-row">
-      <span class="thread-tree-header">Threads</span>
+      <span class="thread-tree-header">{{ t('Threads') }}</span>
       <template #right>
         <div ref="organizeMenuWrapRef" class="organize-menu-wrap">
           <button
             class="organize-menu-trigger"
             type="button"
             :aria-expanded="isOrganizeMenuOpen"
-            aria-label="Organize threads"
-            title="Organize threads"
+            :aria-label="t('Organize threads')"
+            :title="t('Organize threads')"
             @click="toggleOrganizeMenu"
           >
             <IconTablerDots class="thread-icon" />
           </button>
 
           <div v-if="isOrganizeMenuOpen" class="organize-menu-panel" @click.stop>
-            <p class="organize-menu-title">Organize</p>
+            <p class="organize-menu-title">{{ t('Organize') }}</p>
             <button
               class="organize-menu-item"
               :data-active="threadViewMode === 'project'"
               type="button"
               @click="setThreadViewMode('project')"
             >
-              <span>By project</span>
+              <span>{{ t('By project') }}</span>
               <span v-if="threadViewMode === 'project'">✓</span>
             </button>
             <button
@@ -94,7 +100,7 @@
               type="button"
               @click="setThreadViewMode('chronological')"
             >
-              <span>Chronological list</span>
+              <span>{{ t('Chronological list') }}</span>
               <span v-if="threadViewMode === 'chronological'">✓</span>
             </button>
           </div>
@@ -102,36 +108,59 @@
       </template>
     </SidebarMenuRow>
 
-    <p v-if="isSearchActive && filteredGroups.length === 0" class="thread-tree-no-results">No matching threads</p>
+    <p v-if="isSearchActive && filteredGroups.length === 0" class="thread-tree-no-results">{{ t('No matching threads') }}</p>
 
-    <p v-else-if="isLoading && groups.length === 0" class="thread-tree-loading">Loading threads...</p>
+    <p v-else-if="isLoading && groups.length === 0" class="thread-tree-loading">{{ t('Loading threads...') }}</p>
 
     <ul v-else-if="isChronologicalView" class="thread-list thread-list-global">
-      <li v-for="thread in globalThreads" :key="thread.id" class="thread-row-item">
+      <li
+        v-for="thread in globalThreads"
+        :key="thread.id"
+        class="thread-row-item"
+        :data-menu-open="isThreadMenuOpen(thread.id) ? 'true' : 'false'"
+      >
         <SidebarMenuRow
           class="thread-row"
           :data-active="thread.id === selectedThreadId"
           :data-pinned="isPinned(thread.id)"
+          :data-menu-open="isThreadMenuOpen(thread.id) ? 'true' : 'false'"
           :force-right-hover="isThreadMenuOpen(thread.id)"
-          @mouseleave="onThreadRowLeave(thread.id)"
+          @click="onSelect(thread.id)"
+          @mouseleave="onThreadRowLeave(thread.id, $event)"
           @contextmenu="onThreadRowContextMenu($event, thread.id)"
         >
           <template #left>
             <span class="thread-left-stack">
               <span
-                v-if="thread.inProgress || thread.unread"
+                v-if="shouldShowThreadIndicator(thread)"
                 class="thread-status-indicator"
                 :data-state="getThreadState(thread)"
               />
-              <button class="thread-pin-button" type="button" title="pin" @click="togglePin(thread.id)">
+              <button class="thread-pin-button" type="button" title="pin" @click.stop="togglePin(thread.id)">
                 <IconTablerPin class="thread-icon" />
               </button>
             </span>
           </template>
-          <button class="thread-main-button" type="button" @click="onSelect(thread.id)">
+          <button class="thread-main-button" type="button" @click.stop="onSelect(thread.id)">
             <span class="thread-row-title-wrap">
-              <span class="thread-row-title">{{ thread.title }}</span>
-              <IconTablerGitFork v-if="thread.hasWorktree" class="thread-row-worktree-icon" title="Worktree thread" />
+              <span class="thread-row-title-line">
+                <span class="thread-row-title">{{ thread.title }}</span>
+                <IconTablerGitFork v-if="thread.hasWorktree" class="thread-row-worktree-icon" :title="t('Worktree thread')" />
+                <span
+                  v-if="threadHasAutomation(thread.id)"
+                  class="thread-row-automation-chip"
+                  :title="threadAutomationTooltip(thread.id)"
+                >
+                  Auto
+                </span>
+                <span
+                  v-if="thread.pendingRequestState"
+                  class="thread-row-request-chip"
+                  :data-state="thread.pendingRequestState"
+                >
+                  {{ threadRequestLabel(thread) }}
+                </span>
+              </span>
             </span>
           </button>
           <template #right>
@@ -147,23 +176,6 @@
               >
                 <IconTablerDots class="thread-icon" />
               </button>
-              <div v-if="isThreadMenuOpen(thread.id)" class="thread-menu-panel" @click.stop>
-                <button class="thread-menu-item" type="button" @click="onBrowseThreadFiles(thread.id)">
-                  Browse files
-                </button>
-                <button class="thread-menu-item" type="button" @click="onExportThread(thread.id)">
-                  Export chat
-                </button>
-                <button class="thread-menu-item" type="button" @click="onForkThread(thread.id)">
-                  Create chat fork
-                </button>
-                <button class="thread-menu-item" type="button" @click="openRenameThreadDialog(thread.id, thread.title)">
-                  Rename thread
-                </button>
-                <button class="thread-menu-item thread-menu-item-danger" type="button" @click="openDeleteThreadDialog(thread.id, thread.title)">
-                  Delete thread
-                </button>
-              </div>
             </div>
           </template>
         </SidebarMenuRow>
@@ -222,7 +234,12 @@
                     <IconTablerDots class="thread-icon" />
                   </button>
 
-                  <div v-if="isProjectMenuOpen(group.projectName)" class="project-menu-panel" @click.stop>
+                  <div
+                    v-if="isProjectMenuOpen(group.projectName)"
+                    class="project-menu-panel"
+                    :data-open-direction="projectMenuDirectionById[group.projectName] ?? 'down'"
+                    @click.stop
+                  >
                     <template v-if="projectMenuMode === 'actions'">
                       <button class="project-menu-item" type="button" @click="openRenameProjectMenu(group.projectName)">
                         Edit name
@@ -236,7 +253,7 @@
                       </button>
                     </template>
                     <template v-else>
-                      <label class="project-menu-label">Project name</label>
+                      <label class="project-menu-label">{{ t('Project name') }}</label>
                       <input
                         v-model="projectRenameDraft"
                         class="project-menu-input"
@@ -261,31 +278,54 @@
           </SidebarMenuRow>
 
           <ul v-if="hasThreads(group)" class="thread-list">
-            <li v-for="thread in visibleThreads(group)" :key="thread.id" class="thread-row-item">
+            <li
+              v-for="thread in visibleThreads(group)"
+              :key="thread.id"
+              class="thread-row-item"
+              :data-menu-open="isThreadMenuOpen(thread.id) ? 'true' : 'false'"
+            >
               <SidebarMenuRow
                 class="thread-row"
                 :data-active="thread.id === selectedThreadId"
                 :data-pinned="isPinned(thread.id)"
+                :data-menu-open="isThreadMenuOpen(thread.id) ? 'true' : 'false'"
                 :force-right-hover="isThreadMenuOpen(thread.id)"
-                @mouseleave="onThreadRowLeave(thread.id)"
+                @click="onSelect(thread.id)"
+                @mouseleave="onThreadRowLeave(thread.id, $event)"
                 @contextmenu="onThreadRowContextMenu($event, thread.id)"
               >
                 <template #left>
                   <span class="thread-left-stack">
                     <span
-                      v-if="thread.inProgress || thread.unread"
+                      v-if="shouldShowThreadIndicator(thread)"
                       class="thread-status-indicator"
                       :data-state="getThreadState(thread)"
                     />
-                    <button class="thread-pin-button" type="button" title="pin" @click="togglePin(thread.id)">
+                    <button class="thread-pin-button" type="button" title="pin" @click.stop="togglePin(thread.id)">
                       <IconTablerPin class="thread-icon" />
                     </button>
                   </span>
                 </template>
-                <button class="thread-main-button" type="button" @click="onSelect(thread.id)">
+                <button class="thread-main-button" type="button" @click.stop="onSelect(thread.id)">
                   <span class="thread-row-title-wrap">
-                    <span class="thread-row-title">{{ thread.title }}</span>
-                    <IconTablerGitFork v-if="thread.hasWorktree" class="thread-row-worktree-icon" title="Worktree thread" />
+                    <span class="thread-row-title-line">
+                      <span class="thread-row-title">{{ thread.title }}</span>
+                      <IconTablerGitFork v-if="thread.hasWorktree" class="thread-row-worktree-icon" :title="t('Worktree thread')" />
+                      <span
+                        v-if="threadHasAutomation(thread.id)"
+                        class="thread-row-automation-chip"
+                        :title="threadAutomationTooltip(thread.id)"
+                      >
+                        Auto
+                      </span>
+                      <span
+                        v-if="thread.pendingRequestState"
+                        class="thread-row-request-chip"
+                        :data-state="thread.pendingRequestState"
+                      >
+                        {{ threadRequestLabel(thread) }}
+                      </span>
+                    </span>
                   </span>
                 </button>
                 <template #right>
@@ -301,23 +341,6 @@
                     >
                       <IconTablerDots class="thread-icon" />
                     </button>
-                    <div v-if="isThreadMenuOpen(thread.id)" class="thread-menu-panel" @click.stop>
-                      <button class="thread-menu-item" type="button" @click="onBrowseThreadFiles(thread.id)">
-                        Browse files
-                      </button>
-                      <button class="thread-menu-item" type="button" @click="onExportThread(thread.id)">
-                        Export chat
-                      </button>
-                      <button class="thread-menu-item" type="button" @click="onForkThread(thread.id)">
-                        Create chat fork
-                      </button>
-                      <button class="thread-menu-item" type="button" @click="openRenameThreadDialog(thread.id, thread.title)">
-                        Rename thread
-                      </button>
-                      <button class="thread-menu-item thread-menu-item-danger" type="button" @click="openDeleteThreadDialog(thread.id, thread.title)">
-                        Delete thread
-                      </button>
-                    </div>
                   </div>
                 </template>
               </SidebarMenuRow>
@@ -328,7 +351,7 @@
             <template #left>
               <span class="project-empty-spacer" />
             </template>
-            <span class="project-empty">No threads</span>
+            <span class="project-empty">{{ t('No threads') }}</span>
           </SidebarMenuRow>
 
           <SidebarMenuRow v-if="hasHiddenThreads(group)" class="thread-show-more-row">
@@ -343,9 +366,39 @@
     </div>
 
     <Teleport to="body">
+      <div
+        v-if="openThreadMenuThread"
+        ref="openThreadMenuPanelRef"
+        class="thread-menu-panel thread-menu-panel-fixed"
+        :style="openThreadMenuStyle"
+        :data-open-direction="getThreadMenuDirection(openThreadMenuThread.id)"
+        @click.stop
+      >
+        <button class="thread-menu-item" type="button" @click="openAutomationDialog(openThreadMenuThread.id)">
+          {{ threadHasAutomation(openThreadMenuThread.id) ? 'Edit automation…' : 'Add automation…' }}
+        </button>
+        <button class="thread-menu-item" type="button" @click="onBrowseThreadFiles(openThreadMenuThread.id)">
+          Browse files
+        </button>
+        <button class="thread-menu-item" type="button" @click="onExportThread(openThreadMenuThread.id)">
+          Export chat
+        </button>
+        <button class="thread-menu-item" type="button" @click="onForkThread(openThreadMenuThread.id)">
+          Create chat fork
+        </button>
+        <button class="thread-menu-item" type="button" @click="openRenameThreadDialog(openThreadMenuThread.id, openThreadMenuThread.title)">
+          {{ t('Rename thread') }}
+        </button>
+        <button class="thread-menu-item thread-menu-item-danger" type="button" @click="openDeleteThreadDialog(openThreadMenuThread.id, openThreadMenuThread.title)">
+          {{ t('Delete thread') }}
+        </button>
+      </div>
+    </Teleport>
+
+    <Teleport to="body">
       <div v-if="renameThreadDialogVisible" class="rename-thread-overlay" @click.self="closeRenameThreadDialog">
         <div class="rename-thread-panel" role="dialog" aria-modal="true" aria-label="Thread title">
-          <h3 class="rename-thread-title">Rename thread</h3>
+          <h3 class="rename-thread-title">{{ t('Rename thread') }}</h3>
           <p class="rename-thread-subtitle">Make it short and recognizable.</p>
           <input
             ref="renameThreadInputRef"
@@ -357,8 +410,8 @@
             @keydown.esc.prevent="closeRenameThreadDialog"
           />
           <div class="rename-thread-actions">
-            <button class="rename-thread-button" type="button" @click="closeRenameThreadDialog">Cancel</button>
-            <button class="rename-thread-button rename-thread-button-primary" type="button" @click="submitRenameThread">Save</button>
+            <button class="rename-thread-button" type="button" @click="closeRenameThreadDialog">{{ t('Cancel') }}</button>
+            <button class="rename-thread-button rename-thread-button-primary" type="button" @click="submitRenameThread">{{ t('Save') }}</button>
           </div>
         </div>
       </div>
@@ -367,13 +420,77 @@
     <Teleport to="body">
       <div v-if="deleteThreadDialogVisible" class="rename-thread-overlay" @click.self="closeDeleteThreadDialog">
         <div class="rename-thread-panel" role="dialog" aria-modal="true" aria-label="Delete thread">
-          <h3 class="rename-thread-title">Delete thread?</h3>
+          <h3 class="rename-thread-title">{{ deleteThreadHasAutomation ? 'Archive chat and remove automation?' : 'Delete thread?' }}</h3>
           <p class="rename-thread-subtitle">
-            This will archive the thread "{{ deleteThreadTitle }}". You can find it later in archived threads.
+            <template v-if="deleteThreadHasAutomation">
+              This will archive the thread "{{ deleteThreadTitle }}" and remove the attached heartbeat automation.
+            </template>
+            <template v-else>
+              This will archive the thread "{{ deleteThreadTitle }}". You can find it later in archived threads.
+            </template>
           </p>
           <div class="rename-thread-actions">
             <button class="rename-thread-button" type="button" @click="closeDeleteThreadDialog">Cancel</button>
-            <button class="rename-thread-button rename-thread-button-danger" type="button" @click="submitDeleteThread">Delete</button>
+            <button class="rename-thread-button rename-thread-button-danger" type="button" @click="submitDeleteThread">
+              {{ deleteThreadHasAutomation ? 'Archive and remove' : 'Delete' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <Teleport to="body">
+      <div v-if="automationDialogVisible" class="rename-thread-overlay" @click.self="closeAutomationDialog">
+        <div class="rename-thread-panel automation-thread-panel" role="dialog" aria-modal="true" aria-label="Thread automation">
+          <h3 class="rename-thread-title">{{ automationDialogMode === 'edit' ? 'Edit automation' : 'Add automation' }}</h3>
+          <p class="rename-thread-subtitle">This creates a heartbeat automation attached to the selected thread.</p>
+
+          <label class="automation-thread-field">
+            <span class="automation-thread-label">Name</span>
+            <input v-model="automationDraft.name" class="rename-thread-input" type="text" placeholder="Automation name" />
+          </label>
+
+          <label class="automation-thread-field">
+            <span class="automation-thread-label">Prompt</span>
+            <textarea v-model="automationDraft.prompt" class="automation-thread-textarea" rows="6" placeholder="Describe what the automation should do"></textarea>
+          </label>
+
+          <label class="automation-thread-field">
+            <span class="automation-thread-label">Schedule (RRULE)</span>
+            <input
+              v-model="automationDraft.rrule"
+              class="rename-thread-input"
+              type="text"
+              placeholder="FREQ=DAILY;BYHOUR=9;BYMINUTE=0"
+            />
+          </label>
+
+          <label class="automation-thread-field">
+            <span class="automation-thread-label">Status</span>
+            <select v-model="automationDraft.status" class="automation-thread-select">
+              <option value="ACTIVE">{{ t('Active') }}</option>
+              <option value="PAUSED">{{ t('Paused') }}</option>
+            </select>
+          </label>
+
+          <p v-if="automationDialogError" class="rename-thread-subtitle automation-thread-error">{{ automationDialogError }}</p>
+
+          <div class="rename-thread-actions">
+            <button
+              v-if="automationDialogMode === 'edit'"
+              class="rename-thread-button rename-thread-button-danger"
+              type="button"
+              :disabled="isSavingAutomation"
+              @click="onDeleteAutomationFromDialog"
+            >
+              Remove
+            </button>
+            <button class="rename-thread-button" type="button" :disabled="isSavingAutomation" @click="closeAutomationDialog">
+              {{ t('Cancel') }}
+            </button>
+            <button class="rename-thread-button rename-thread-button-primary" type="button" :disabled="isSavingAutomation" @click="submitAutomationDialog">
+              {{ isSavingAutomation ? 'Saving…' : 'Save' }}
+            </button>
           </div>
         </div>
       </div>
@@ -382,9 +499,16 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { ComponentPublicInstance } from 'vue'
-import type { UiProjectGroup, UiThread } from '../../types/codex'
+import {
+  deleteThreadAutomation,
+  getPinnedThreadState,
+  getThreadAutomationMap,
+  persistPinnedThreadIds,
+  upsertThreadAutomation,
+} from '../../api/codexGateway'
+import type { UiProjectGroup, UiThread, UiThreadAutomation, UiThreadAutomationStatus } from '../../types/codex'
 import IconTablerChevronDown from '../icons/IconTablerChevronDown.vue'
 import IconTablerChevronRight from '../icons/IconTablerChevronRight.vue'
 import IconTablerDots from '../icons/IconTablerDots.vue'
@@ -393,6 +517,7 @@ import IconTablerFolder from '../icons/IconTablerFolder.vue'
 import IconTablerFolderOpen from '../icons/IconTablerFolderOpen.vue'
 import IconTablerGitFork from '../icons/IconTablerGitFork.vue'
 import IconTablerPin from '../icons/IconTablerPin.vue'
+import { useUiLanguage } from '../../composables/useUiLanguage'
 import SidebarMenuRow from './SidebarMenuRow.vue'
 
 const props = defineProps<{
@@ -403,6 +528,8 @@ const props = defineProps<{
   searchQuery: string
   searchMatchedThreadIds: string[] | null
 }>()
+
+const { t } = useUiLanguage()
 
 const emit = defineEmits<{
   select: [threadId: string]
@@ -446,13 +573,19 @@ type DragPointerSample = {
   clientY: number
 }
 
+type MenuDirection = 'up' | 'down'
+
 const DRAG_START_THRESHOLD_PX = 4
 const PROJECT_GROUP_EXPANDED_GAP_PX = 6
 const expandedProjects = ref<Record<string, boolean>>({})
 const collapsedProjects = ref<Record<string, boolean>>({})
+let hasLoadedPinnedThreadState = false
 const pinnedThreadIds = ref<string[]>([])
 const openProjectMenuId = ref('')
 const openThreadMenuId = ref('')
+const projectMenuDirectionById = ref<Record<string, MenuDirection>>({})
+const threadMenuDirectionById = ref<Record<string, MenuDirection>>({})
+const openThreadMenuStyle = ref<Record<string, string>>({})
 const projectMenuMode = ref<'actions' | 'rename'>('actions')
 const projectRenameDraft = ref('')
 const renameThreadDialogVisible = ref(false)
@@ -462,6 +595,23 @@ const renameThreadInputRef = ref<HTMLInputElement | null>(null)
 const deleteThreadDialogVisible = ref(false)
 const deleteThreadDialogThreadId = ref('')
 const deleteThreadTitle = ref('')
+const automationByThreadId = ref<Record<string, UiThreadAutomation>>({})
+const automationDialogVisible = ref(false)
+const automationDialogThreadId = ref('')
+const automationDialogMode = ref<'create' | 'edit'>('create')
+const automationDialogError = ref('')
+const isSavingAutomation = ref(false)
+const automationDraft = ref<{
+  name: string
+  prompt: string
+  rrule: string
+  status: UiThreadAutomationStatus
+}>({
+  name: '',
+  prompt: '',
+  rrule: 'FREQ=DAILY;BYHOUR=9;BYMINUTE=0',
+  status: 'ACTIVE',
+})
 const groupsContainerRef = ref<HTMLElement | null>(null)
 const pendingProjectDrag = ref<PendingProjectDrag | null>(null)
 const activeProjectDrag = ref<ActiveProjectDrag | null>(null)
@@ -474,6 +624,7 @@ const projectMenuWrapElementByName = new Map<string, HTMLElement>()
 const threadMenuWrapElementById = new Map<string, HTMLElement>()
 const projectNameByElement = new WeakMap<HTMLElement, string>()
 const organizeMenuWrapRef = ref<HTMLElement | null>(null)
+const openThreadMenuPanelRef = ref<HTMLElement | null>(null)
 const isOrganizeMenuOpen = ref(false)
 const THREAD_VIEW_MODE_STORAGE_KEY = 'codex-web-local.thread-view-mode.v1'
 const threadViewMode = ref<'project' | 'chronological'>(loadThreadViewMode())
@@ -586,6 +737,43 @@ const threadById = computed(() => {
 
   return map
 })
+
+watch(
+  pinnedThreadIds,
+  (threadIds) => {
+    if (!hasLoadedPinnedThreadState) return
+    void persistPinnedThreadIds(threadIds)
+  },
+)
+
+watch(threadById, (threadsById) => {
+  const filtered = pinnedThreadIds.value.filter((threadId) => threadsById.has(threadId))
+  if (filtered.length === pinnedThreadIds.value.length) return
+  pinnedThreadIds.value = filtered
+})
+
+onMounted(async () => {
+  const { threadIds } = await getPinnedThreadState()
+  const normalized = Array.isArray(threadIds)
+    ? threadIds
+      .filter((item): item is string => typeof item === 'string')
+      .map((item) => item.trim())
+      .filter((item, index, rows) => item.length > 0 && rows.indexOf(item) === index)
+    : []
+
+  if (normalized.length > 0) {
+    pinnedThreadIds.value = normalized
+  }
+  try {
+    automationByThreadId.value = await getThreadAutomationMap()
+  } catch {
+    automationByThreadId.value = {}
+  }
+  hasLoadedPinnedThreadState = true
+})
+
+const deleteThreadHasAutomation = computed(() => threadHasAutomation(deleteThreadDialogThreadId.value))
+
 const threadProjectNameById = computed(() => {
   const map = new Map<string, string>()
   for (const group of props.groups) {
@@ -612,6 +800,11 @@ const threadTimestampById = computed(() => {
     }
   }
   return map
+})
+
+const openThreadMenuThread = computed(() => {
+  const threadId = openThreadMenuId.value
+  return threadId ? (threadById.value.get(threadId) ?? null) : null
 })
 
 const pinnedThreads = computed(() =>
@@ -714,6 +907,21 @@ function onSelect(threadId: string): void {
   emit('select', threadId)
 }
 
+function threadHasAutomation(threadId: string): boolean {
+  return Boolean(automationByThreadId.value[threadId])
+}
+
+function threadAutomationTooltip(threadId: string): string {
+  const automation = automationByThreadId.value[threadId]
+  if (!automation) return ''
+  const nextRunLabel = automation.status === 'PAUSED'
+    ? '-'
+    : automation.nextRunAtMs
+      ? new Date(automation.nextRunAtMs).toLocaleString()
+      : 'Not scheduled'
+  return `${automation.name} • Next run: ${nextRunLabel}`
+}
+
 function onExportThread(threadId: string): void {
   emit('export-thread', threadId)
   closeThreadMenu()
@@ -737,10 +945,14 @@ function onBrowseThreadFiles(threadId: string): void {
   closeThreadMenu()
 }
 
-function onThreadRowLeave(threadId: string): void {
-  if (openThreadMenuId.value === threadId) {
-    closeThreadMenu()
+function onThreadRowLeave(threadId: string, event?: MouseEvent): void {
+  if (openThreadMenuId.value !== threadId) return
+  if (event) {
+    const relatedTarget = event.relatedTarget
+    const panelElement = openThreadMenuPanelRef.value
+    if (relatedTarget instanceof Node && panelElement && panelElement.contains(relatedTarget)) return
   }
+  closeThreadMenu()
 }
 
 function isThreadMenuOpen(threadId: string): boolean {
@@ -749,6 +961,7 @@ function isThreadMenuOpen(threadId: string): boolean {
 
 function closeThreadMenu(): void {
   openThreadMenuId.value = ''
+  openThreadMenuStyle.value = {}
 }
 
 function toggleThreadMenu(threadId: string): void {
@@ -756,7 +969,13 @@ function toggleThreadMenu(threadId: string): void {
     closeThreadMenu()
     return
   }
+
+  closeProjectMenu()
+  isOrganizeMenuOpen.value = false
   openThreadMenuId.value = threadId
+  nextTick(() => {
+    updateOpenThreadMenuPlacement(threadId)
+  })
 }
 
 function onThreadRowContextMenu(event: MouseEvent, threadId: string): void {
@@ -802,12 +1021,85 @@ function closeDeleteThreadDialog(): void {
   deleteThreadTitle.value = ''
 }
 
-function submitDeleteThread(): void {
+async function submitDeleteThread(): Promise<void> {
   const threadId = deleteThreadDialogThreadId.value
   if (!threadId) return
+  if (threadHasAutomation(threadId)) {
+    try {
+      await deleteThreadAutomation(threadId)
+    } catch {
+      // Keep thread archive usable even if automation cleanup fails.
+    }
+    automationByThreadId.value = Object.fromEntries(
+      Object.entries(automationByThreadId.value).filter(([id]) => id !== threadId),
+    )
+  }
   pinnedThreadIds.value = pinnedThreadIds.value.filter((id) => id !== threadId)
   emit('archive', threadId)
   closeDeleteThreadDialog()
+}
+
+function openAutomationDialog(threadId: string): void {
+  const existing = automationByThreadId.value[threadId]
+  automationDialogThreadId.value = threadId
+  automationDialogMode.value = existing ? 'edit' : 'create'
+  automationDialogError.value = ''
+  automationDraft.value = {
+    name: existing?.name ?? 'Thread automation',
+    prompt: existing?.prompt ?? '',
+    rrule: existing?.rrule ?? 'FREQ=DAILY;BYHOUR=9;BYMINUTE=0',
+    status: existing?.status ?? 'ACTIVE',
+  }
+  automationDialogVisible.value = true
+  closeThreadMenu()
+}
+
+function closeAutomationDialog(): void {
+  automationDialogVisible.value = false
+  automationDialogThreadId.value = ''
+  automationDialogError.value = ''
+  isSavingAutomation.value = false
+}
+
+async function submitAutomationDialog(): Promise<void> {
+  const threadId = automationDialogThreadId.value
+  if (!threadId) return
+  isSavingAutomation.value = true
+  automationDialogError.value = ''
+  try {
+    const saved = await upsertThreadAutomation({
+      threadId,
+      name: automationDraft.value.name,
+      prompt: automationDraft.value.prompt,
+      rrule: automationDraft.value.rrule,
+      status: automationDraft.value.status,
+    })
+    automationByThreadId.value = {
+      ...automationByThreadId.value,
+      [threadId]: saved,
+    }
+    closeAutomationDialog()
+  } catch (error) {
+    automationDialogError.value = error instanceof Error ? error.message : 'Failed to save automation'
+    isSavingAutomation.value = false
+  }
+}
+
+async function onDeleteAutomationFromDialog(): Promise<void> {
+  const threadId = automationDialogThreadId.value
+  if (!threadId) return
+  isSavingAutomation.value = true
+  automationDialogError.value = ''
+  try {
+    await deleteThreadAutomation(threadId)
+    automationByThreadId.value = Object.fromEntries(
+      Object.entries(automationByThreadId.value).filter(([id]) => id !== threadId),
+    )
+    closeAutomationDialog()
+  } catch (error) {
+    automationDialogError.value = error instanceof Error ? error.message : 'Failed to remove automation'
+    isSavingAutomation.value = false
+  }
 }
 
 function getProjectDisplayName(projectName: string): string {
@@ -825,7 +1117,12 @@ function closeProjectMenu(): void {
 }
 
 function toggleOrganizeMenu(): void {
-  isOrganizeMenuOpen.value = !isOrganizeMenuOpen.value
+  const nextValue = !isOrganizeMenuOpen.value
+  if (nextValue) {
+    closeProjectMenu()
+    closeThreadMenu()
+  }
+  isOrganizeMenuOpen.value = nextValue
 }
 
 function setThreadViewMode(mode: 'project' | 'chronological'): void {
@@ -839,15 +1136,24 @@ function toggleProjectMenu(projectName: string): void {
     return
   }
 
+  closeThreadMenu()
+  isOrganizeMenuOpen.value = false
   openProjectMenuId.value = projectName
   projectMenuMode.value = 'actions'
   projectRenameDraft.value = getProjectDisplayName(projectName)
+  nextTick(() => {
+    updateProjectMenuDirection(projectName)
+  })
 }
 
 function openRenameProjectMenu(projectName: string): void {
+  closeThreadMenu()
   openProjectMenuId.value = projectName
   projectMenuMode.value = 'rename'
   projectRenameDraft.value = getProjectDisplayName(projectName)
+  nextTick(() => {
+    updateProjectMenuDirection(projectName)
+  })
 }
 
 function onProjectNameInput(projectName: string): void {
@@ -948,6 +1254,104 @@ function setThreadMenuWrapRef(threadId: string, element: Element | ComponentPubl
   threadMenuWrapElementById.delete(threadId)
 }
 
+function findMenuBoundaryRect(element: HTMLElement): DOMRect {
+  let parent: HTMLElement | null = element.parentElement
+  while (parent) {
+    const styles = window.getComputedStyle(parent)
+    const overflowY = styles.overflowY || styles.overflow
+    if (overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'hidden' || overflowY === 'clip') {
+      return parent.getBoundingClientRect()
+    }
+    parent = parent.parentElement
+  }
+
+  return new DOMRect(0, 0, window.innerWidth, window.innerHeight)
+}
+
+function resolveMenuDirection(menuWrapElement: HTMLElement, panelHeight: number): MenuDirection {
+  const wrapRect = menuWrapElement.getBoundingClientRect()
+  const boundaryRect = findMenuBoundaryRect(menuWrapElement)
+  const panelGap = 6
+  const spaceBelow = boundaryRect.bottom - wrapRect.bottom
+  const spaceAbove = wrapRect.top - boundaryRect.top
+
+  if (spaceBelow >= panelHeight + panelGap) return 'down'
+  if (spaceAbove > spaceBelow) return 'up'
+  return 'down'
+}
+
+function updateThreadMenuDirection(threadId: string, panelHeight: number): MenuDirection {
+  const menuWrapElement = threadMenuWrapElementById.get(threadId)
+  if (!menuWrapElement) return 'down'
+
+  const direction = resolveMenuDirection(menuWrapElement, panelHeight)
+
+  threadMenuDirectionById.value = {
+    ...threadMenuDirectionById.value,
+    [threadId]: direction,
+  }
+  return direction
+}
+
+function getThreadMenuDirection(threadId: string): MenuDirection {
+  return threadMenuDirectionById.value[threadId] ?? 'down'
+}
+
+function updateProjectMenuDirection(projectName: string): void {
+  const menuWrapElement = projectMenuWrapElementByName.get(projectName)
+  if (!menuWrapElement) return
+
+  projectMenuDirectionById.value = {
+    ...projectMenuDirectionById.value,
+    [projectName]: resolveMenuDirection(menuWrapElement, 112),
+  }
+}
+
+function clamp(value: number, minValue: number, maxValue: number): number {
+  return Math.min(Math.max(value, minValue), maxValue)
+}
+
+function updateOpenThreadMenuPlacement(threadId: string): void {
+  const menuWrapElement = threadMenuWrapElementById.get(threadId)
+  if (!menuWrapElement) return
+
+  const panelElement = openThreadMenuPanelRef.value
+  const panelRect = panelElement?.getBoundingClientRect()
+  const panelHeight = panelRect?.height || panelElement?.offsetHeight || 112
+  const panelWidth = panelRect?.width || panelElement?.offsetWidth || 160
+  const direction = updateThreadMenuDirection(threadId, panelHeight)
+  const wrapRect = menuWrapElement.getBoundingClientRect()
+  const viewportGap = 8
+  const offset = 4
+  const maxLeft = Math.max(viewportGap, window.innerWidth - panelWidth - viewportGap)
+  const left = clamp(wrapRect.right - panelWidth, viewportGap, maxLeft)
+  const top =
+    direction === 'up'
+      ? clamp(wrapRect.top - panelHeight - offset, viewportGap, Math.max(viewportGap, window.innerHeight - panelHeight - viewportGap))
+      : clamp(wrapRect.bottom + offset, viewportGap, Math.max(viewportGap, window.innerHeight - panelHeight - viewportGap))
+
+  openThreadMenuStyle.value = {
+    left: `${Math.round(left)}px`,
+    top: `${Math.round(top)}px`,
+  }
+}
+
+function onThreadMenuViewportChange(): void {
+  const threadId = openThreadMenuId.value
+  if (!threadId) return
+  updateOpenThreadMenuPlacement(threadId)
+}
+
+function bindThreadMenuPositionListeners(): void {
+  window.addEventListener('resize', onThreadMenuViewportChange)
+  document.addEventListener('scroll', onThreadMenuViewportChange, true)
+}
+
+function unbindThreadMenuPositionListeners(): void {
+  window.removeEventListener('resize', onThreadMenuViewportChange)
+  document.removeEventListener('scroll', onThreadMenuViewportChange, true)
+}
+
 function isEventInsideOpenProjectMenu(event: Event): boolean {
   const projectName = openProjectMenuId.value
   if (!projectName) return false
@@ -972,8 +1376,14 @@ function isEventInsideOpenThreadMenu(event: Event): boolean {
   const eventPath = typeof event.composedPath === 'function' ? event.composedPath() : []
   if (eventPath.includes(openMenuWrapElement)) return true
 
+  const panelElement = openThreadMenuPanelRef.value
+  if (panelElement && eventPath.includes(panelElement)) return true
+
   const target = event.target
-  return target instanceof Node ? openMenuWrapElement.contains(target) : false
+  if (!(target instanceof Node)) return false
+  if (openMenuWrapElement.contains(target)) return true
+  if (panelElement && panelElement.contains(target)) return true
+  return false
 }
 
 function onProjectMenuPointerDown(event: PointerEvent): void {
@@ -1320,7 +1730,17 @@ function hasThreads(group: UiProjectGroup): boolean {
   return projectThreads(group).length > 0
 }
 
-function getThreadState(thread: UiThread): 'working' | 'unread' | 'idle' {
+function shouldShowThreadIndicator(thread: UiThread): boolean {
+  return Boolean(thread.pendingRequestState) || thread.inProgress || thread.unread
+}
+
+function threadRequestLabel(thread: UiThread): string {
+  return thread.pendingRequestState === 'approval' ? 'Awaiting approval' : 'Awaiting response'
+}
+
+function getThreadState(thread: UiThread): 'awaiting-approval' | 'awaiting-response' | 'working' | 'unread' | 'idle' {
+  if (thread.pendingRequestState === 'approval') return 'awaiting-approval'
+  if (thread.pendingRequestState === 'response') return 'awaiting-response'
   if (thread.inProgress) return 'working'
   if (thread.unread) return 'unread'
   return 'idle'
@@ -1345,7 +1765,9 @@ watch(
   },
 )
 
-const hasOpenDismissableMenu = computed(() => isOrganizeMenuOpen.value || openProjectMenuId.value !== '')
+const hasOpenDismissableMenu = computed(
+  () => isOrganizeMenuOpen.value || openProjectMenuId.value !== '' || openThreadMenuId.value !== '',
+)
 
 watch(hasOpenDismissableMenu, (isOpen) => {
   if (isOpen) {
@@ -1356,12 +1778,25 @@ watch(hasOpenDismissableMenu, (isOpen) => {
   unbindProjectMenuDismissListeners()
 })
 
+watch(openThreadMenuId, (threadId) => {
+  if (!threadId) {
+    unbindThreadMenuPositionListeners()
+    return
+  }
+
+  bindThreadMenuPositionListeners()
+  nextTick(() => {
+    updateOpenThreadMenuPlacement(threadId)
+  })
+})
+
 onBeforeUnmount(() => {
   for (const element of projectGroupElementByName.values()) {
     projectGroupResizeObserver?.unobserve(element)
   }
   projectGroupElementByName.clear()
   projectMenuWrapElementByName.clear()
+  unbindThreadMenuPositionListeners()
   unbindProjectMenuDismissListeners()
   resetProjectDragState()
 })
@@ -1478,6 +1913,12 @@ onBeforeUnmount(() => {
   @apply absolute right-0 top-full mt-1 z-20 min-w-36 rounded-md border border-zinc-200 bg-white p-1 shadow-md flex flex-col gap-0.5;
 }
 
+.project-menu-panel[data-open-direction='up'] {
+  top: auto;
+  bottom: calc(100% + 0.25rem);
+  margin-top: 0;
+}
+
 .project-menu-item {
   @apply rounded px-2 py-1 text-left text-sm text-zinc-700 hover:bg-zinc-100;
 }
@@ -1522,8 +1963,16 @@ onBeforeUnmount(() => {
   @apply m-0;
 }
 
+.thread-row-item[data-menu-open='true'] {
+  @apply relative z-40;
+}
+
 .thread-row {
   @apply hover:bg-zinc-200;
+}
+
+.thread-row[data-menu-open='true'] {
+  @apply relative z-30;
 }
 
 .thread-left-stack {
@@ -1539,15 +1988,31 @@ onBeforeUnmount(() => {
 }
 
 .thread-row-title-wrap {
-  @apply min-w-0 inline-flex items-center gap-1;
+  @apply min-w-0 inline-flex w-full items-center;
+}
+
+.thread-row-title-line {
+  @apply min-w-0 inline-flex w-full items-center gap-1.5;
 }
 
 .thread-row-title {
-  @apply block text-sm leading-5 font-normal text-zinc-800 truncate whitespace-nowrap;
+  @apply min-w-0 block flex-1 text-sm leading-5 font-normal text-zinc-800 truncate whitespace-nowrap;
 }
 
 .thread-row-worktree-icon {
   @apply w-3 h-3 text-zinc-500 shrink-0;
+}
+
+.thread-row-request-chip {
+  @apply inline-flex shrink-0 items-center rounded-full border px-2.5 py-1 text-[11px] font-medium leading-none;
+}
+
+.thread-row-request-chip[data-state='approval'] {
+  @apply border-emerald-500/20 bg-emerald-500/15 text-emerald-700;
+}
+
+.thread-row-request-chip[data-state='response'] {
+  @apply border-sky-200 bg-sky-50 text-sky-700;
 }
 
 .thread-status-indicator {
@@ -1568,6 +2033,16 @@ onBeforeUnmount(() => {
 
 .thread-menu-panel {
   @apply absolute right-0 top-full mt-1 z-20 min-w-36 rounded-md border border-zinc-200 bg-white p-1 shadow-md flex flex-col gap-0.5;
+}
+
+.thread-menu-panel-fixed {
+  @apply fixed top-0 right-auto bottom-auto left-0 mt-0 z-50;
+}
+
+.thread-menu-panel:not(.thread-menu-panel-fixed)[data-open-direction='up'] {
+  top: auto;
+  bottom: calc(100% + 0.25rem);
+  margin-top: 0;
 }
 
 .thread-menu-item {
@@ -1592,6 +2067,10 @@ onBeforeUnmount(() => {
 
 .thread-show-more-button {
   @apply block mx-auto rounded-lg px-2 py-0.5 text-sm font-normal text-zinc-600 transition hover:text-zinc-800 hover:bg-zinc-200;
+}
+
+.thread-row-automation-chip {
+  @apply rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-800;
 }
 
 .project-header-row:hover .project-icon-folder {
@@ -1621,10 +2100,22 @@ onBeforeUnmount(() => {
   @apply border-2 border-zinc-500 border-t-transparent bg-transparent animate-spin;
 }
 
+.thread-status-indicator[data-state='awaiting-approval'] {
+  @apply bg-emerald-500;
+}
+
+.thread-status-indicator[data-state='awaiting-response'] {
+  @apply bg-sky-500;
+}
+
 .thread-row:hover .thread-status-indicator[data-state='unread'],
 .thread-row:hover .thread-status-indicator[data-state='working'],
+.thread-row:hover .thread-status-indicator[data-state='awaiting-approval'],
+.thread-row:hover .thread-status-indicator[data-state='awaiting-response'],
 .thread-row:focus-within .thread-status-indicator[data-state='unread'],
-.thread-row:focus-within .thread-status-indicator[data-state='working'] {
+.thread-row:focus-within .thread-status-indicator[data-state='working'],
+.thread-row:focus-within .thread-status-indicator[data-state='awaiting-approval'],
+.thread-row:focus-within .thread-status-indicator[data-state='awaiting-response'] {
   @apply opacity-0;
 }
 
@@ -1633,23 +2124,24 @@ onBeforeUnmount(() => {
 }
 
 .rename-thread-panel {
-  @apply w-full max-w-sm rounded-xl bg-white p-4 shadow-xl;
+  @apply w-full max-w-sm rounded-xl bg-white p-4 shadow-xl
+         max-h-[90vh] flex flex-col overflow-hidden;
 }
 
 .rename-thread-title {
-  @apply m-0 text-base font-semibold text-zinc-900;
+  @apply m-0 text-base font-semibold text-zinc-900 shrink-0;
 }
 
 .rename-thread-subtitle {
-  @apply mt-1 mb-3 text-sm text-zinc-500;
+  @apply mt-1 mb-3 text-sm text-zinc-500 overflow-y-auto flex-1 min-h-0 min-w-0 break-words;
 }
 
 .rename-thread-input {
-  @apply w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none focus:border-zinc-500;
+  @apply w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none focus:border-zinc-500 shrink-0;
 }
 
 .rename-thread-actions {
-  @apply mt-3 flex items-center justify-end gap-2;
+  @apply mt-3 flex items-center justify-end gap-2 shrink-0;
 }
 
 .rename-thread-button {
@@ -1662,5 +2154,26 @@ onBeforeUnmount(() => {
 
 .rename-thread-button-danger {
   @apply bg-rose-600 text-white hover:bg-rose-700;
+}
+
+.automation-thread-panel {
+  @apply max-w-lg;
+}
+
+.automation-thread-field {
+  @apply mb-3 flex flex-col gap-1;
+}
+
+.automation-thread-label {
+  @apply text-xs font-medium uppercase tracking-wide text-zinc-500;
+}
+
+.automation-thread-textarea,
+.automation-thread-select {
+  @apply w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none focus:border-zinc-500;
+}
+
+.automation-thread-error {
+  @apply mb-0 text-rose-600;
 }
 </style>

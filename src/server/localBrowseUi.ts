@@ -9,6 +9,21 @@ type DirectoryItem = {
   mtimeMs: number
 }
 
+export type LocalDirectoryListingEntry = {
+  name: string
+  path: string
+}
+
+export type LocalDirectoryListing = {
+  path: string
+  parentPath: string
+  entries: LocalDirectoryListingEntry[]
+}
+
+type LocalDirectoryListingOptions = {
+  showHidden?: boolean
+}
+
 const TEXT_EDITABLE_EXTENSIONS = new Set([
   '.txt', '.md', '.json', '.js', '.ts', '.tsx', '.jsx', '.css', '.scss',
   '.html', '.htm', '.xml', '.yml', '.yaml', '.log', '.csv', '.env', '.py',
@@ -67,6 +82,10 @@ export function isTextEditablePath(pathValue: string): boolean {
   return TEXT_EDITABLE_EXTENSIONS.has(extname(pathValue).toLowerCase())
 }
 
+function isHiddenName(value: string): boolean {
+  return value.startsWith('.')
+}
+
 function looksLikeTextBuffer(buffer: Buffer): boolean {
   if (buffer.length === 0) return true
   for (const byte of buffer) {
@@ -108,12 +127,20 @@ function escapeHtml(value: string): string {
     .replace(/'/gu, '&#39;')
 }
 
-function toBrowseHref(pathValue: string): string {
-  return `/codex-local-browse${encodeURI(pathValue)}`
+function normalizeNewProjectName(value: string): string {
+  return value.trim().replace(/[\\/]+/gu, '').trim()
 }
 
-function toEditHref(pathValue: string): string {
-  return `/codex-local-edit${encodeURI(pathValue)}`
+function toBrowseHref(pathValue: string, newProjectName = ''): string {
+  const normalizedName = normalizeNewProjectName(newProjectName)
+  const query = normalizedName ? `?newProjectName=${encodeURIComponent(normalizedName)}` : ''
+  return `/codex-local-browse${encodeURI(pathValue)}${query}`
+}
+
+function toEditHref(pathValue: string, newProjectName = ''): string {
+  const normalizedName = normalizeNewProjectName(newProjectName)
+  const query = normalizedName ? `?newProjectName=${encodeURIComponent(normalizedName)}` : ''
+  return `/codex-local-edit${encodeURI(pathValue)}${query}`
 }
 
 function escapeForInlineScriptString(value: string): string {
@@ -147,22 +174,93 @@ async function getDirectoryItems(localPath: string): Promise<DirectoryItem[]> {
   })
 }
 
-export async function createDirectoryListingHtml(localPath: string): Promise<string> {
+function projectCreationTargetPath(parentPath: string, newProjectName: string): string {
+  const normalizedName = normalizeNewProjectName(newProjectName)
+  if (!normalizedName) return ''
+  return join(parentPath, normalizedName)
+}
+
+function projectCreationButtonLabel(newProjectName: string): string {
+  const normalizedName = normalizeNewProjectName(newProjectName)
+  return normalizedName ? `Create ${normalizedName} here` : ''
+}
+
+function projectCreationStatusText(newProjectName: string): string {
+  const normalizedName = normalizeNewProjectName(newProjectName)
+  return normalizedName ? `Creating ${normalizedName} in Codex...` : 'Creating project in Codex...'
+}
+
+function openFolderStatusText(newProjectName: string): string {
+  const normalizedName = normalizeNewProjectName(newProjectName)
+  return normalizedName
+    ? `Opening folder in Codex without creating ${normalizedName}...`
+    : 'Opening folder in Codex...'
+}
+
+function failureStatusText(newProjectName: string): string {
+  const normalizedName = normalizeNewProjectName(newProjectName)
+  return normalizedName
+    ? `Failed to open folder or create ${normalizedName}.`
+    : 'Failed to open folder.'
+}
+
+function actionButtonsHtml(localPath: string, newProjectName: string): string {
+  const normalizedName = normalizeNewProjectName(newProjectName)
+  const createTargetPath = projectCreationTargetPath(localPath, normalizedName)
+  const createButton = createTargetPath
+    ? `<button class="header-open-btn create-project-btn" type="button" aria-label="${escapeHtml(projectCreationButtonLabel(normalizedName))}" title="${escapeHtml(projectCreationButtonLabel(normalizedName))}" data-path="${escapeHtml(createTargetPath)}" data-label="${escapeHtml(normalizedName)}" data-status="${escapeHtml(projectCreationStatusText(normalizedName))}" data-error="${escapeHtml(failureStatusText(normalizedName))}">${escapeHtml(projectCreationButtonLabel(normalizedName))}</button>`
+    : ''
+  const openButton = `<button class="header-open-btn open-folder-btn" type="button" aria-label="Open current folder in Codex" title="Open folder in Codex" data-path="${escapeHtml(localPath)}" data-label="" data-status="${escapeHtml(openFolderStatusText(normalizedName))}" data-error="${escapeHtml(failureStatusText(normalizedName))}">Open folder in Codex</button>`
+  return `${createButton}${openButton}`
+}
+
+export async function getLocalDirectoryListing(
+  localPath: string,
+  options: LocalDirectoryListingOptions = {},
+): Promise<LocalDirectoryListing> {
+  const entries = await readdir(localPath, { withFileTypes: true })
+  const directories = entries
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => ({
+      name: entry.name,
+      path: join(localPath, entry.name),
+    }))
+    .filter((entry) => options.showHidden === true || !isHiddenName(entry.name))
+    .sort((a, b) => {
+      const aHidden = isHiddenName(a.name)
+      const bHidden = isHiddenName(b.name)
+      if (aHidden !== bHidden) return aHidden ? -1 : 1
+      return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
+    })
+
+  return {
+    path: localPath,
+    parentPath: dirname(localPath),
+    entries: directories,
+  }
+}
+
+export async function createDirectoryListingHtml(localPath: string, options?: { newProjectName?: string }): Promise<string> {
+  const newProjectName = normalizeNewProjectName(options?.newProjectName ?? '')
   const items = await getDirectoryItems(localPath)
   const parentPath = dirname(localPath)
   const rows = items
     .map((item) => {
       const suffix = item.isDirectory ? '/' : ''
       const editAction = item.editable
-        ? ` <a class="icon-btn" aria-label="Edit ${escapeHtml(item.name)}" href="${escapeHtml(toEditHref(item.path))}" title="Edit">✏️</a>`
+        ? ` <a class="icon-btn" aria-label="Edit ${escapeHtml(item.name)}" href="${escapeHtml(toEditHref(item.path, newProjectName))}" title="Edit">✏️</a>`
         : ''
-      return `<li class="file-row"><a class="file-link" href="${escapeHtml(toBrowseHref(item.path))}">${escapeHtml(item.name)}${suffix}</a><span class="row-actions">${editAction}</span></li>`
+      return `<li class="file-row"><a class="file-link" href="${escapeHtml(toBrowseHref(item.path, newProjectName))}">${escapeHtml(item.name)}${suffix}</a><span class="row-actions">${editAction}</span></li>`
     })
     .join('\n')
 
   const parentLink = localPath !== parentPath
-    ? `<a href="${escapeHtml(toBrowseHref(parentPath))}">..</a>`
+    ? `<a class="header-parent-link" href="${escapeHtml(toBrowseHref(parentPath, newProjectName))}">..</a>`
     : ''
+  const pickerSummary = newProjectName
+    ? `<p class="picker-summary">Browse to the parent folder where you want to create <strong>${escapeHtml(newProjectName)}</strong>, or open the current folder directly.</p>`
+    : ''
+  const actionButtons = actionButtonsHtml(localPath, newProjectName)
 
   return `<!doctype html>
 <html lang="en">
@@ -194,6 +292,7 @@ export async function createDirectoryListingHtml(localPath: string): Promise<str
     }
     .header-open-btn:hover { filter: brightness(1.08); }
     .header-open-btn:disabled { opacity: 0.6; cursor: default; }
+    .picker-summary { margin: 10px 0 0; color: #b8d5ff; max-width: 60rem; line-height: 1.45; }
     .row-actions { display: inline-flex; align-items: center; gap: 8px; min-width: 42px; justify-content: flex-end; }
     .icon-btn { display: inline-flex; align-items: center; justify-content: center; width: 42px; height: 42px; border: 1px solid #36557a; border-radius: 10px; background: #162643; color: #dbe6ff; text-decoration: none; cursor: pointer; }
     .icon-btn:hover { filter: brightness(1.08); text-decoration: none; }
@@ -209,9 +308,10 @@ export async function createDirectoryListingHtml(localPath: string): Promise<str
 </head>
 <body>
   <h1>Index of ${escapeHtml(localPath)}</h1>
+  ${pickerSummary}
   <div class="header-actions">
-    ${parentLink ? `<a class="header-parent-link" href="${escapeHtml(toBrowseHref(parentPath))}">..</a>` : ''}
-    <button class="header-open-btn open-folder-btn" type="button" aria-label="Open current folder in Codex" title="Open folder in Codex" data-path="${escapeHtml(localPath)}">Open folder in Codex</button>
+    ${parentLink}
+    ${actionButtons}
   </div>
   <p id="status" class="status"></p>
   <ul>${rows}</ul>
@@ -220,31 +320,36 @@ export async function createDirectoryListingHtml(localPath: string): Promise<str
     document.addEventListener('click', async (event) => {
       const target = event.target;
       if (!(target instanceof Element)) return;
-      const button = target.closest('.open-folder-btn');
+      const button = target.closest('.open-folder-btn, .create-project-btn');
       if (!(button instanceof HTMLButtonElement)) return;
 
       const path = button.getAttribute('data-path') || '';
+      const label = button.getAttribute('data-label') || '';
+      const statusText = button.getAttribute('data-status') || 'Opening folder in Codex...';
+      const errorText = button.getAttribute('data-error') || 'Failed to open folder.';
       if (!path) return;
       button.disabled = true;
-      status.textContent = 'Opening folder in Codex...';
+      status.textContent = statusText;
       try {
         const response = await fetch('/codex-api/project-root', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             path,
-            createIfMissing: false,
-            label: '',
+            createIfMissing: button.classList.contains('create-project-btn'),
+            label,
           }),
         });
         if (!response.ok) {
-          status.textContent = 'Failed to open folder.';
+          status.textContent = errorText;
           button.disabled = false;
           return;
         }
-        window.location.assign('/#/');
+        status.textContent = 'Folder opened. Returning to Codex...';
+        const nextUrl = '/?openProjectPath=' + encodeURIComponent(path) + '#/';
+        window.location.assign(nextUrl);
       } catch {
-        status.textContent = 'Failed to open folder.';
+        status.textContent = errorText;
         button.disabled = false;
       }
     });
