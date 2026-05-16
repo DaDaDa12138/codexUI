@@ -17,6 +17,11 @@ import {
   prependPathEntry,
   resolveCodexCommand,
 } from '../commandResolution.js'
+import {
+  parseApprovalPolicy,
+  parseSandboxMode,
+  resolveAppServerRuntimeConfig,
+} from '../server/appServerRuntimeConfig.js'
 import { createServer as createApp } from '../server/httpServer.js'
 import { generatePassword } from '../server/password.js'
 import { spawnSyncCommand } from '../utils/commandInvocation.js'
@@ -247,14 +252,32 @@ function ensureCodexInstalled(): string | null {
   return codexCommand
 }
 
-function resolvePassword(input: string | boolean): string | undefined {
+type PasswordResolution = {
+  password: string | undefined
+  generated: boolean
+}
+
+function resolvePassword(input: string | boolean): PasswordResolution {
   if (input === false) {
-    return undefined
+    return { password: undefined, generated: false }
   }
   if (typeof input === 'string') {
-    return input
+    return { password: input, generated: false }
   }
-  return generatePassword()
+  return { password: generatePassword(), generated: true }
+}
+
+function getGeneratedPasswordPath(): string {
+  return join(getCodexHomePath(), 'codexui-password')
+}
+
+async function persistGeneratedPassword(password: string): Promise<string> {
+  const codexHome = getCodexHomePath()
+  mkdirSync(codexHome, { recursive: true })
+  const passwordPath = getGeneratedPasswordPath()
+  await writeFile(passwordPath, `${password}\n`, { encoding: 'utf8', mode: 0o600 })
+  chmodSync(passwordPath, 0o600)
+  return passwordPath
 }
 
 function printTermuxKeepAlive(lines: string[]): void {
@@ -278,6 +301,10 @@ function openBrowser(url: string): void {
   const child = spawn(command.cmd, command.args, { detached: true, stdio: 'ignore' })
   child.on('error', () => {})
   child.unref()
+}
+
+function buildTunnelAutologinUrl(tunnelUrl: string, _password: string | undefined): string {
+  return tunnelUrl
 }
 
 function parseCloudflaredUrl(chunk: string): string | null {
@@ -307,6 +334,34 @@ function getAccessibleUrls(port: number): string[] {
     }
   } catch {}
   return Array.from(urls)
+}
+
+function isTailscaleIPv4Address(address: string): boolean {
+  const parts = address.split('.')
+  if (parts.length !== 4) return false
+  const octets = parts.map((part) => Number.parseInt(part, 10))
+  if (octets.some((value) => Number.isNaN(value) || value < 0 || value > 255)) return false
+  return octets[0] === 100 && octets[1] >= 64 && octets[1] <= 127
+}
+
+function isTailscaleIPv6Address(address: string): boolean {
+  const normalized = address.toLowerCase()
+  return normalized.startsWith('fd7a:115c:a1e0:')
+}
+
+function hasDetectedTailscaleIp(): boolean {
+  try {
+    const interfaces = networkInterfaces()
+    for (const entries of Object.values(interfaces)) {
+      if (!entries) continue
+      for (const entry of entries) {
+        if (entry.internal) continue
+        if (entry.family === 'IPv4' && isTailscaleIPv4Address(entry.address)) return true
+        if (entry.family === 'IPv6' && isTailscaleIPv6Address(entry.address)) return true
+      }
+    }
+  } catch {}
+  return false
 }
 
 async function startCloudflaredTunnel(command: string, localPort: number): Promise<{
@@ -438,7 +493,17 @@ async function addProjectOnly(projectPath: string): Promise<void> {
   await persistLaunchProject(trimmed)
 }
 
-async function startServer(options: { port: string; password: string | boolean; tunnel: boolean; open: boolean; projectPath?: string }) {
+async function startServer(options: {
+  port: string
+  password: string | boolean
+  tunnel: boolean
+  open: boolean
+  login: boolean
+  memories: boolean
+  sandboxMode?: string
+  approvalPolicy?: string
+  projectPath?: string
+}) {
   const version = await readCliVersion()
   const projectPath = options.projectPath?.trim() ?? ''
   if (projectPath.length > 0) {
@@ -453,16 +518,27 @@ async function startServer(options: { port: string; password: string | boolean; 
   if (codexCommand) {
     process.env.CODEXUI_CODEX_COMMAND = codexCommand
   }
-  if (!hasCodexAuth() && codexCommand) {
-    console.log('\nCodex is not logged in. Starting `codex login`...\n')
-    runOrFail(codexCommand, ['login'], 'Codex login')
+  if (options.sandboxMode) {
+    process.env.CODEXUI_SANDBOX_MODE = options.sandboxMode
+  }
+  if (options.approvalPolicy) {
+    process.env.CODEXUI_APPROVAL_POLICY = options.approvalPolicy
+  }
+  const runtimeConfig = resolveAppServerRuntimeConfig()
+  if (options.login && !hasCodexAuth()) {
+    console.log('\nCodex is not logged in. You can log in later via settings or run `codexui login`.\n')
   }
   const requestedPort = parseInt(options.port, 10)
-  const password = resolvePassword(options.password)
+  const passwordResolution = resolvePassword(options.password)
+  const password = passwordResolution.password
+  const generatedPasswordPath = password && passwordResolution.generated
+    ? await persistGeneratedPassword(password)
+    : null
   const { app, dispose, attachWebSocket } = createApp({ password })
   const server = createServer(app)
   attachWebSocket(server)
   const port = await listenWithFallback(server, requestedPort)
+  process.env.CODEXUI_SERVER_PORT = String(port)
   let tunnelChild: ReturnType<typeof spawn> | null = null
   let tunnelUrl: string | null = null
 
@@ -488,6 +564,8 @@ async function startServer(options: { port: string; password: string | boolean; 
     '  GitHub:   https://github.com/friuns2/codexui',
     '',
     `  Bind:     http://0.0.0.0:${String(port)}`,
+    `  Codex sandbox: ${runtimeConfig.sandboxMode}`,
+    `  Approval policy: ${runtimeConfig.approvalPolicy}`,
   ]
   const accessUrls = getAccessibleUrls(port)
   if (accessUrls.length > 0) {
@@ -501,19 +579,22 @@ async function startServer(options: { port: string; password: string | boolean; 
     lines.push(`  Requested port ${String(requestedPort)} was unavailable; using ${String(port)}.`)
   }
 
-  if (password) {
-    lines.push(`  Password: ${password}`)
+  if (generatedPasswordPath) {
+    lines.push(`  Generated password file: ${generatedPasswordPath}`)
+    lines.push('  Use that file to retrieve the password for untrusted origins.')
   }
+
+  const tunnelQrUrl = tunnelUrl ? buildTunnelAutologinUrl(tunnelUrl, password) : null
   if (tunnelUrl) {
-    lines.push(`  Tunnel:   ${tunnelUrl}`)
+    lines.push(`  Tunnel:   ${tunnelQrUrl ?? tunnelUrl}`)
     lines.push('  Tunnel QR code below')
   }
 
   printTermuxKeepAlive(lines)
   lines.push('')
   console.log(lines.join('\n'))
-  if (tunnelUrl) {
-    qrcode.generate(tunnelUrl, { small: true })
+  if (tunnelQrUrl) {
+    qrcode.generate(tunnelQrUrl, { small: true })
     console.log('')
   }
   if (options.open) openBrowser(`http://localhost:${String(port)}`)
@@ -548,19 +629,52 @@ async function runLogin() {
 program
   .argument('[projectPath]', 'project directory to open on launch')
   .option('--open-project <path>', 'open project directory on launch (Codex desktop parity)')
-  .option('-p, --port <port>', 'port to listen on', '5999')
+  .option('-p, --port <port>', 'port to listen on', '5900')
   .option('--password <pass>', 'set a specific password')
   .option('--no-password', 'disable password protection')
-  .option('--tunnel', 'start cloudflared tunnel', true)
+  .option('--tunnel', 'start cloudflared tunnel (default is auto by Tailscale detection)', true)
   .option('--no-tunnel', 'disable cloudflared tunnel startup')
   .option('--open', 'open browser on startup', true)
   .option('--no-open', 'do not open browser on startup')
+  .option('--login', 'run automatic Codex login bootstrap', true)
+  .option('--no-login', 'skip automatic Codex login bootstrap')
+  .option('--memories', 'enable Codex memories for spawned app-server processes', true)
+  .option('--no-memories', 'disable Codex memories for spawned app-server processes')
+  .option('--sandbox-mode <mode>', 'Codex sandbox mode: read-only, workspace-write, danger-full-access')
+  .option('--approval-policy <policy>', 'Codex approval policy: untrusted, on-failure, on-request, never')
   .action(async (
     projectPath: string | undefined,
-    opts: { port: string; password: string | boolean; tunnel: boolean; open: boolean; openProject?: string },
+    opts: {
+      port: string
+      password: string | boolean
+      tunnel: boolean
+      open: boolean
+      login: boolean
+      memories: boolean
+      sandboxMode?: string
+      approvalPolicy?: string
+      openProject?: string
+    },
   ) => {
     const rawArgv = process.argv.slice(2)
     const openProjectFlagIndex = rawArgv.findIndex((arg) => arg === '--open-project' || arg.startsWith('--open-project='))
+    const tunnelFlagExplicit = rawArgv.some((arg) => (
+      arg === '--tunnel'
+      || arg === '--no-tunnel'
+      || arg.startsWith('--tunnel=')
+      || arg.startsWith('--no-tunnel=')
+    ))
+    const memoriesFlagExplicit = rawArgv.some((arg) => (
+      arg === '--memories'
+      || arg === '--no-memories'
+      || arg.startsWith('--memories=')
+      || arg.startsWith('--no-memories=')
+    ))
+    const effectiveTunnel = tunnelFlagExplicit ? opts.tunnel : hasDetectedTailscaleIp()
+    if (memoriesFlagExplicit) {
+      process.env.CODEXUI_MEMORIES = opts.memories ? 'true' : 'false'
+    }
+
     let openProjectOnly = (opts.openProject ?? '').trim()
     if (!openProjectOnly && openProjectFlagIndex >= 0 && projectPath?.trim()) {
       // Commander may map "--open-project ." to the positional arg in this command layout.
@@ -573,7 +687,21 @@ program
     }
 
     const launchProject = (projectPath ?? '').trim()
-    await startServer({ ...opts, projectPath: launchProject })
+    if (opts.sandboxMode) {
+      const parsedSandboxMode = parseSandboxMode(opts.sandboxMode)
+      if (!parsedSandboxMode) {
+        throw new Error(`Invalid sandbox mode: ${opts.sandboxMode}`)
+      }
+      opts.sandboxMode = parsedSandboxMode
+    }
+    if (opts.approvalPolicy) {
+      const parsedApprovalPolicy = parseApprovalPolicy(opts.approvalPolicy)
+      if (!parsedApprovalPolicy) {
+        throw new Error(`Invalid approval policy: ${opts.approvalPolicy}`)
+      }
+      opts.approvalPolicy = parsedApprovalPolicy
+    }
+    await startServer({ ...opts, tunnel: effectiveTunnel, projectPath: launchProject })
   })
 
 program.command('login').description('Install/check Codex CLI and run `codex login`').action(runLogin)

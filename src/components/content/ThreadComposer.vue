@@ -4,7 +4,13 @@
       {{ dictationErrorText }}
     </p>
 
-    <div class="thread-composer-shell" :class="{ 'thread-composer-shell--no-top-radius': hasQueueAbove }">
+    <div
+      class="thread-composer-shell"
+      :class="{
+        'thread-composer-shell--no-top-radius': hasQueueAbove,
+        'thread-composer-shell--drag-active': isDragActive,
+      }"
+    >
       <div v-if="selectedImages.length > 0" class="thread-composer-attachments">
         <div v-for="image in selectedImages" :key="image.id" class="thread-composer-attachment">
           <img class="thread-composer-attachment-image" :src="image.url" :alt="image.name || 'Selected image'" />
@@ -58,17 +64,38 @@
 
       <div v-if="selectedSkills.length > 0" class="thread-composer-skill-chips">
         <span v-for="skill in selectedSkills" :key="skill.path" class="thread-composer-skill-chip">
-          <span class="thread-composer-skill-chip-name">{{ skill.name }}</span>
+          <button
+            class="thread-composer-skill-chip-name"
+            type="button"
+            :title="skillMarkdownPath(skill.path)"
+            :aria-label="`Open ${skill.displayName || skill.name} SKILL.md`"
+            @click="openSkillMarkdown(skill)"
+          >
+            {{ skill.displayName || skill.name }}
+          </button>
           <button
             class="thread-composer-skill-chip-remove"
             type="button"
-            :aria-label="`Remove skill ${skill.name}`"
+            :aria-label="`Remove skill ${skill.displayName || skill.name}`"
             @click="removeSkill(skill.path)"
           >×</button>
         </span>
       </div>
 
-      <div class="thread-composer-input-wrap">
+      <div
+        class="thread-composer-input-wrap"
+        :class="{
+          'thread-composer-input-wrap--drag-active': isDragActive,
+          'thread-composer-input-wrap--expanded': isComposerExpanded,
+        }"
+        @dragenter="onInputDragEnter"
+        @dragover="onInputDragOver"
+        @dragleave="onInputDragLeave"
+        @drop="onInputDrop"
+      >
+        <div v-if="isDragActive" class="thread-composer-drop-overlay" aria-hidden="true">
+          <span class="thread-composer-drop-overlay-copy">Drop images or files</span>
+        </div>
         <div v-if="isFileMentionOpen" class="thread-composer-file-mentions">
           <template v-if="fileMentionSuggestions.length > 0">
             <button
@@ -94,7 +121,7 @@
               </span>
             </button>
           </template>
-          <div v-else class="thread-composer-file-mention-empty">No matching files</div>
+          <div v-else class="thread-composer-file-mention-empty">{{ t('No matching files') }}</div>
         </div>
         <textarea
           ref="inputRef"
@@ -104,15 +131,20 @@
           :disabled="isInteractionDisabled"
           @input="onInputChange"
           @keydown="onInputKeydown"
+          @paste="onInputPaste"
         />
-        <ComposerSkillPicker
-          :skills="skillOptions"
-          :visible="isSlashMenuOpen"
-          :anchor-bottom="44"
-          :anchor-left="0"
-          @select="onSlashSkillSelect"
-          @close="closeSlashMenu"
-        />
+        <button
+          v-if="hasExpandedComposerToggle"
+          class="thread-composer-expand"
+          type="button"
+          :aria-label="isComposerExpanded ? t('Exit full screen composer') : t('Expand composer')"
+          :title="isComposerExpanded ? t('Exit full screen composer') : t('Expand composer')"
+          :disabled="isInteractionDisabled"
+          @click="toggleComposerExpanded"
+        >
+          <IconTablerMinimize v-if="isComposerExpanded" class="thread-composer-expand-icon" />
+          <IconTablerMaximize v-else class="thread-composer-expand-icon" />
+        </button>
       </div>
 
       <div
@@ -123,7 +155,7 @@
           <button
             class="thread-composer-attach-trigger"
             type="button"
-            aria-label="Add photos & files"
+            :aria-label="t('Add photos & files')"
             :disabled="isInteractionDisabled"
             @click="toggleAttachMenu"
           >
@@ -137,7 +169,7 @@
               :disabled="isInteractionDisabled"
               @click="triggerPhotoLibrary"
             >
-              Add photos & files
+              {{ t('Add photos & files') }}
             </button>
             <button
               class="thread-composer-attach-item"
@@ -145,7 +177,7 @@
               :disabled="isInteractionDisabled"
               @click="triggerFolderPicker"
             >
-              Add folder
+              {{ t('Add folder') }}
             </button>
             <button
               class="thread-composer-attach-item"
@@ -153,11 +185,11 @@
               :disabled="isInteractionDisabled"
               @click="triggerCameraCapture"
             >
-              Take photo
+              {{ t('Take photo') }}
             </button>
             <div class="thread-composer-attach-separator" />
             <div class="thread-composer-attach-mode">
-              <span class="thread-composer-attach-mode-label">In-progress send</span>
+              <span class="thread-composer-attach-mode-label">{{ t('In-progress send') }}</span>
               <div class="thread-composer-attach-mode-buttons">
                 <button
                   class="thread-composer-attach-mode-button"
@@ -166,7 +198,7 @@
                   :disabled="isInteractionDisabled"
                   @click="setActiveInProgressMode('steer')"
                 >
-                  Steer
+                  {{ t('Steer') }}
                 </button>
                 <button
                   class="thread-composer-attach-mode-button"
@@ -175,7 +207,7 @@
                   :disabled="isInteractionDisabled"
                   @click="setActiveInProgressMode('queue')"
                 >
-                  Queue
+                  {{ t('Queue') }}
                 </button>
               </div>
             </div>
@@ -186,12 +218,12 @@
               type="button"
               role="switch"
               :aria-checked="selectedSpeedMode === 'fast'"
-              :aria-label="`Fast mode ${selectedSpeedMode === 'fast' ? 'enabled' : 'disabled'}`"
+              :aria-label="`${t('Fast mode')} ${selectedSpeedMode === 'fast' ? t('enabled') : t('disabled')}`"
               :disabled="isSpeedToggleDisabled"
               @click="onToggleSpeedMode"
             >
               <span class="thread-composer-attach-setting-copy">
-                <span class="thread-composer-attach-setting-label">Fast mode</span>
+                <span class="thread-composer-attach-setting-label">{{ t('Fast mode') }}</span>
                 <span class="thread-composer-attach-setting-description">{{ speedModeDescription }}</span>
               </span>
               <span
@@ -203,6 +235,24 @@
                 }"
               />
             </button>
+            <button
+              class="thread-composer-attach-setting"
+              type="button"
+              role="switch"
+              :aria-checked="isPlanModeSelected"
+              :aria-label="isPlanModeSelected ? t('Disable plan mode') : t('Enable plan mode')"
+              :disabled="isComposerConfigDisabled"
+              @click="toggleCollaborationMode"
+            >
+              <span class="thread-composer-attach-setting-copy">
+                <span class="thread-composer-attach-setting-label">{{ t('Plan mode') }}</span>
+                <span class="thread-composer-attach-setting-description">{{ t('Agent proposes a plan before acting') }}</span>
+              </span>
+              <span
+                class="thread-composer-attach-switch"
+                :class="{ 'is-on': isPlanModeSelected }"
+              />
+            </button>
           </div>
         </div>
 
@@ -212,9 +262,11 @@
             :model-value="selectedModel"
             :options="modelOptions"
             :selected-prefix-icon="showFastModeModelIcon ? IconTablerBolt : null"
-            placeholder="Model"
+            :placeholder="t('Model')"
             open-direction="up"
-            :disabled="disabled || !activeThreadId || models.length === 0 || isTurnInProgress"
+            :disabled="isComposerConfigDisabled || models.length === 0"
+            enable-search
+            :search-placeholder="t('Search models...')"
             @update:model-value="onModelSelect"
           />
 
@@ -222,20 +274,25 @@
             class="thread-composer-control"
             :options="skillDropdownOptions"
             :selected-values="selectedSkillPaths"
-            placeholder="Skills"
-            search-placeholder="Search skills..."
+            :placeholder="t('Skills')"
+            :search-placeholder="t('Search skills and prompts...')"
+            :create-label="t('Add new prompt')"
+            :allow-remove="true"
+            :remove-label="t('Remove prompt')"
             open-direction="up"
-            :disabled="disabled || !activeThreadId || isTurnInProgress"
+            :disabled="isComposerConfigDisabled"
             @toggle="onSkillDropdownToggle"
+            @create="onCreatePrompt"
+            @remove="onRemovePrompt"
           />
 
           <ComposerDropdown
             class="thread-composer-control"
             :model-value="selectedReasoningEffort"
             :options="reasoningOptions"
-            placeholder="Thinking"
+            :placeholder="t('Thinking')"
             open-direction="up"
-            :disabled="disabled || !activeThreadId || isTurnInProgress"
+            :disabled="isComposerConfigDisabled"
             @update:model-value="onReasoningEffortSelect"
           />
         </template>
@@ -278,19 +335,21 @@
             v-if="isTurnInProgress && !hasSubmitContent"
             class="thread-composer-stop"
             type="button"
-            aria-label="Stop"
-            :disabled="disabled || !activeThreadId || isInterruptingTurn"
+            :aria-label="isStopPending ? t('Saving thread before stop is available') : t('Stop')"
+            :title="isStopPending ? t('Saving thread before stop is available') : t('Stop')"
+            :disabled="disabled || !activeThreadId || isInterruptingTurn || isStopPending"
             @click="onInterrupt"
           >
-            <IconTablerPlayerStopFilled class="thread-composer-stop-icon" />
+            <span v-if="isStopPending" class="thread-composer-stop-spinner" aria-hidden="true" />
+            <IconTablerPlayerStopFilled v-else class="thread-composer-stop-icon" />
           </button>
           <button
             v-else
             class="thread-composer-submit"
             :class="{ 'thread-composer-submit--queue': isTurnInProgress && activeInProgressMode === 'queue' }"
             type="button"
-            :aria-label="isTurnInProgress && activeInProgressMode === 'queue' ? 'Queue message' : 'Send message'"
-            :title="isTurnInProgress ? `Send as ${activeInProgressMode}` : 'Send'"
+            :aria-label="isTurnInProgress && activeInProgressMode === 'queue' ? t('Queue message') : t('Send message')"
+            :title="isTurnInProgress ? `${t('Send')} ${activeInProgressMode === 'queue' ? t('Queue') : t('Steer')}` : t('Send')"
             :disabled="!canSubmit"
             @click="onSubmit(isTurnInProgress ? activeInProgressMode : 'steer')"
           >
@@ -332,30 +391,61 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import type { ReasoningEffort, SpeedMode } from '../../types/codex'
+import type {
+  CollaborationModeKind,
+  CollaborationModeOption,
+  ReasoningEffort,
+  SpeedMode,
+  UiRateLimitSnapshot,
+  UiRateLimitWindow,
+  UiThreadTokenUsage,
+  UiTokenUsageBreakdown,
+} from '../../types/codex'
 import { useDictation } from '../../composables/useDictation'
-import { searchComposerFiles, uploadFile, type ComposerFileSuggestion } from '../../api/codexGateway'
+import { useMobile } from '../../composables/useMobile'
+import { useUiLanguage } from '../../composables/useUiLanguage'
+import {
+  createComposerPrompt,
+  getComposerPrompts,
+  removeComposerPrompt,
+  searchComposerFiles,
+  uploadFile,
+  type ComposerFileSuggestion,
+  type ComposerPromptInfo,
+} from '../../api/codexGateway'
 import IconTablerArrowUp from '../icons/IconTablerArrowUp.vue'
 import IconTablerBolt from '../icons/IconTablerBolt.vue'
 import IconTablerFilePencil from '../icons/IconTablerFilePencil.vue'
 import IconTablerFolder from '../icons/IconTablerFolder.vue'
+import IconTablerMaximize from '../icons/IconTablerMaximize.vue'
 import IconTablerMicrophone from '../icons/IconTablerMicrophone.vue'
+import IconTablerMinimize from '../icons/IconTablerMinimize.vue'
 import IconTablerPlayerStopFilled from '../icons/IconTablerPlayerStopFilled.vue'
 import ComposerDropdown from './ComposerDropdown.vue'
 import ComposerSearchDropdown from './ComposerSearchDropdown.vue'
-import ComposerSkillPicker from './ComposerSkillPicker.vue'
 
-type SkillItem = { name: string; description: string; path: string }
+type SkillSourceBadge = {
+  badge: string
+  badgeLabel: string
+  badgeTone: 'repo' | 'system' | 'plugin' | 'user' | 'prompt'
+}
+
+type SkillItem = { name: string; displayName?: string; description: string; path: string; scope?: string; enabled?: boolean }
 
 const props = defineProps<{
   activeThreadId: string
   cwd?: string
+  collaborationModes?: CollaborationModeOption[]
+  selectedCollaborationMode: CollaborationModeKind
   models: string[]
   selectedModel: string
   selectedReasoningEffort: ReasoningEffort | ''
   selectedSpeedMode: SpeedMode
   skills?: SkillItem[]
+  threadTokenUsage?: UiThreadTokenUsage | null
+  codexQuota?: UiRateLimitSnapshot | null
   isTurnInProgress?: boolean
+  isStopPending?: boolean
   isInterruptingTurn?: boolean
   isUpdatingSpeedMode?: boolean
   disabled?: boolean
@@ -363,7 +453,6 @@ const props = defineProps<{
   sendWithEnter?: boolean
   inProgressSubmitMode?: 'steer' | 'queue'
   dictationClickToToggle?: boolean
-  prependDraftRequest?: { id: number; text: string } | null
   dictationAutoSend?: boolean
   dictationLanguage?: string
 }>()
@@ -383,21 +472,23 @@ export type SubmitPayload = {
   fileAttachments: FileAttachment[]
   skills: Array<{ name: string; path: string }>
   mode: 'steer' | 'queue'
-  rollbackLatestUserTurn?: boolean
 }
 
 export type ThreadComposerExposed = {
   hydrateDraft: (payload: ComposerDraftPayload) => void
+  appendTextToDraft: (text: string) => void
   hasUnsavedDraft: () => boolean
 }
 
 const emit = defineEmits<{
   submit: [payload: SubmitPayload]
   interrupt: []
+  'update:selected-collaboration-mode': [mode: CollaborationModeKind]
   'update:selected-model': [modelId: string]
   'update:selected-reasoning-effort': [effort: ReasoningEffort | '']
   'update:selected-speed-mode': [mode: SpeedMode]
 }>()
+const { t } = useUiLanguage()
 
 type SelectedImage = {
   id: string
@@ -414,13 +505,27 @@ type FolderUploadGroup = {
   isUploading: boolean
 }
 
+type AttachmentBatchStats = {
+  total: number
+  succeeded: number
+  failed: number
+}
+
+const CONTEXT_WINDOW_BASELINE_TOKENS = 12000
+const PASTED_TEXT_FILE_THRESHOLD = 2000
+const PROMPT_OPTION_PREFIX = 'prompt:'
+
 const draft = ref('')
 const selectedImages = ref<SelectedImage[]>([])
 const selectedSkills = ref<SkillItem[]>([])
+const savedPrompts = ref<ComposerPromptInfo[]>([])
 const fileAttachments = ref<FileAttachment[]>([])
 const folderUploadGroups = ref<FolderUploadGroup[]>([])
 
 const dictationFeedback = ref('')
+const pendingAttachmentCount = ref(0)
+const attachmentBatchStats = ref<AttachmentBatchStats | null>(null)
+const isDragActive = ref(false)
 const {
   state: dictationState,
   isSupported: isDictationSupported,
@@ -437,10 +542,7 @@ const {
     dictationFeedback.value = ''
     if (props.dictationAutoSend !== false) {
       const mode = props.isTurnInProgress ? activeInProgressMode.value : 'steer'
-      onSubmit(mode, {
-        rollbackLatestUserTurn: mode === 'steer' && dictationShouldRollbackLatestUserTurn,
-      })
-      dictationShouldRollbackLatestUserTurn = false
+      onSubmit(mode)
       return
     }
     nextTick(() => inputRef.value?.focus())
@@ -463,18 +565,22 @@ const photoLibraryInputRef = ref<HTMLInputElement | null>(null)
 const cameraCaptureInputRef = ref<HTMLInputElement | null>(null)
 const folderPickerInputRef = ref<HTMLInputElement | null>(null)
 const inputRef = ref<HTMLTextAreaElement | null>(null)
+const { isMobile } = useMobile()
 const isAttachMenuOpen = ref(false)
-const isSlashMenuOpen = ref(false)
 const mentionStartIndex = ref<number | null>(null)
 const mentionQuery = ref('')
 const fileMentionSuggestions = ref<ComposerFileSuggestion[]>([])
 const isFileMentionOpen = ref(false)
 const fileMentionHighlightedIndex = ref(0)
+const isComposerExpanded = ref(false)
+const isDraftOverflowing = ref(false)
+let composerOverflowMeasurementQueued = false
 const draftGeneration = ref(0)
 let fileMentionSearchToken = 0
 let fileMentionDebounceTimer: ReturnType<typeof setTimeout> | null = null
 let isHoldPressActive = false
-let dictationShouldRollbackLatestUserTurn = false
+let dragDepth = 0
+let attachmentSessionToken = 0
 const isAndroid = typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent)
 const DRAFT_STORAGE_PREFIX = 'codex-web-local.thread-draft.v1.'
 let lastActiveThreadId = ''
@@ -494,21 +600,45 @@ function formatModelLabel(modelId: string): string {
 const modelOptions = computed(() =>
   props.models.map((modelId) => ({ value: modelId, label: formatModelLabel(modelId) })),
 )
+const isPlanModeSelected = computed(() => props.selectedCollaborationMode === 'plan')
 
-const skillOptions = computed<SkillItem[]>(() => props.skills ?? [])
+const isPlanModeWaitingForModel = computed(() =>
+  props.selectedCollaborationMode === 'plan' && props.selectedModel.trim().length === 0,
+)
+
 const selectedSkillPaths = computed(() => selectedSkills.value.map((s) => s.path))
 const skillDropdownOptions = computed(() =>
-  (props.skills ?? []).map((s) => ({
-    value: s.path,
-    label: s.name,
-    description: s.description,
-  })),
+  [
+    ...(props.skills ?? []).map((s) => {
+      const source = skillSourceBadge(s)
+      return {
+        value: s.path,
+        label: s.name,
+        description: s.description,
+        badge: source.badge,
+        badgeLabel: source.badgeLabel,
+        badgeTone: source.badgeTone,
+        removable: false,
+      }
+    }),
+    ...savedPrompts.value.map((prompt) => ({
+      value: promptOptionValue(prompt.path),
+      label: prompt.name,
+      description: prompt.description,
+      badge: 'T',
+      badgeLabel: 'Prompt',
+      badgeTone: 'prompt' as const,
+      removable: true,
+    })),
+  ],
 )
 
 const canSubmit = computed(() => {
   if (props.disabled) return false
   if (props.isUpdatingSpeedMode) return false
   if (!props.activeThreadId) return false
+  if (isPlanModeWaitingForModel.value) return false
+  if (pendingAttachmentCount.value > 0) return false
   return draft.value.trim().length > 0 || selectedImages.value.length > 0 || fileAttachments.value.length > 0
 })
 const hasUnsavedDraft = computed(() =>
@@ -526,7 +656,8 @@ const standaloneFileAttachments = computed(() => {
   return fileAttachments.value.filter((att) => !grouped.has(att.fsPath))
 })
 const isInteractionDisabled = computed(() => props.disabled || !props.activeThreadId)
-const isFastModeSupported = computed(() => props.selectedModel.trim() === 'gpt-5.4')
+const isComposerConfigDisabled = computed(() => props.disabled || !props.activeThreadId)
+const isFastModeSupported = computed(() => /^gpt-5\.(?:4|5)(?:$|-)/.test(props.selectedModel.trim()))
 const showFastModeModelIcon = computed(() =>
   props.selectedSpeedMode === 'fast' && isFastModeSupported.value,
 )
@@ -535,11 +666,11 @@ const isSpeedToggleDisabled = computed(() =>
 )
 const speedModeDescription = computed(() => {
   if (props.isUpdatingSpeedMode) {
-    return 'Saving speed setting...'
+    return t('Saving speed setting...')
   }
   return props.selectedSpeedMode === 'fast'
-    ? 'About 1.5x faster, with credits used at 2x'
-    : 'Default speed with normal credit usage'
+    ? t('About 1.5x faster, with credits used at 2x')
+    : t('Default speed with normal credit usage')
 })
 const inProgressMode = computed<'steer' | 'queue'>(() =>
   props.inProgressSubmitMode === 'steer' ? 'steer' : 'queue',
@@ -547,12 +678,35 @@ const inProgressMode = computed<'steer' | 'queue'>(() =>
 const activeInProgressMode = ref<'steer' | 'queue'>(inProgressMode.value)
 const isDictationRecording = computed(() => dictationState.value === 'recording')
 const dictationButtonLabel = computed(() => {
-  if (dictationState.value === 'recording') return 'Stop dictation'
-  return props.dictationClickToToggle ? 'Click to dictate' : 'Hold to dictate'
+  if (dictationState.value === 'recording') return t('Stop dictation')
+  return props.dictationClickToToggle ? t('Click to dictate') : t('Hold to dictate')
 })
 const dictationErrorText = computed(() =>
   dictationState.value === 'idle' ? dictationFeedback.value.trim() : '',
 )
+const attachmentFeedbackText = computed(() => {
+  const stats = attachmentBatchStats.value
+  if (stats) {
+    const completed = stats.succeeded + stats.failed
+    const remaining = Math.max(0, stats.total - completed)
+    if (remaining > 0) {
+      if (stats.failed > 0) {
+        return `${stats.failed} ${t('failed')}, ${t('attaching')} ${formatAttachmentFileCount(remaining)}...`
+      }
+      return remaining === 1 ? t('Attaching file...') : `${t('Attaching')} ${remaining} ${t('files...')}`
+    }
+    if (stats.failed > 0) {
+      if (stats.succeeded > 0) {
+        return `${stats.succeeded} ${t('attached')}, ${stats.failed} ${t('failed')}.`
+      }
+      return stats.failed === 1 ? t('Could not attach file.') : `${t('Could not attach')} ${stats.failed} ${t('files.')}`
+    }
+  }
+  if (pendingAttachmentCount.value <= 0) return ''
+  return pendingAttachmentCount.value === 1
+    ? t('Attaching file...')
+    : `${t('Attaching')} ${pendingAttachmentCount.value} ${t('files...')}`
+})
 const dictationDurationLabel = computed(() => {
   const totalSeconds = Math.max(0, Math.floor(recordingDurationMs.value / 1000))
   const minutes = Math.floor(totalSeconds / 60)
@@ -561,13 +715,244 @@ const dictationDurationLabel = computed(() => {
 })
 
 const placeholderText = computed(() =>
-  props.activeThreadId ? 'Type a message... (@ for files, / for skills)' : 'Select a thread to send a message',
+  !props.activeThreadId
+    ? t('Select a thread to send a message')
+    : isPlanModeWaitingForModel.value
+      ? t('Loading models for plan mode...')
+      : t('Type a message... (@ for files)'),
 )
 const hasSubmitContent = computed(() =>
   draft.value.trim().length > 0 || selectedImages.value.length > 0 || fileAttachments.value.length > 0,
 )
+const draftLineCount = computed(() => draft.value.split('\n').length)
+const hasExpandedComposerToggle = computed(() =>
+  isComposerExpanded.value || draftLineCount.value >= 6 || isDraftOverflowing.value,
+)
+const quotaSummaryText = computed(() => buildQuotaSummaryText(props.codexQuota ?? null))
+const quotaWeeklyRefreshText = computed(() => '')
+const quotaTooltipText = computed(() => buildQuotaTooltipText(props.codexQuota ?? null))
+const contextUsageView = computed(() => buildContextUsageView(props.threadTokenUsage ?? null))
+const contextUsageSummaryText = computed(() => contextUsageView.value?.summaryText ?? '')
+const contextUsageTooltipText = computed(() => contextUsageView.value?.tooltipText ?? '')
+const contextUsageRemainingPercent = computed(() => contextUsageView.value?.percentRemaining ?? 0)
+const contextUsageTone = computed(() => contextUsageView.value?.tone ?? 'healthy')
 
-function onSubmit(mode: 'steer' | 'queue' = 'steer', options?: { rollbackLatestUserTurn?: boolean }): void {
+function formatPlanType(planType: string | null | undefined): string {
+  if (!planType || planType === 'unknown') return ''
+  if (planType === 'edu') return 'Education'
+  return `${planType.slice(0, 1).toUpperCase()}${planType.slice(1)}`
+}
+
+function formatWindowSpan(windowMinutes: number | null): string {
+  if (typeof windowMinutes !== 'number' || !Number.isFinite(windowMinutes) || windowMinutes <= 0) return ''
+  if (windowMinutes % 1440 === 0) return `${windowMinutes / 1440}d`
+  if (windowMinutes % 60 === 0) return `${windowMinutes / 60}h`
+  return `${windowMinutes}m`
+}
+
+function formatResetTime(resetsAt: number | null): string {
+  if (typeof resetsAt !== 'number' || !Number.isFinite(resetsAt)) return ''
+  const resetMs = resetsAt * 1000
+  const diffMs = resetMs - Date.now()
+  if (diffMs <= 0) return 'resetting now'
+
+  const totalMinutes = Math.round(diffMs / 60000)
+  if (totalMinutes < 60) return `resets in ${Math.max(1, totalMinutes)}m`
+
+  const totalHours = Math.round(totalMinutes / 60)
+  if (totalHours < 48) return `resets in ${Math.max(1, totalHours)}h`
+
+  const totalDays = Math.round(totalHours / 24)
+  return `resets in ${Math.max(1, totalDays)}d`
+}
+
+function formatResetDate(resetsAt: number | null): string {
+  if (typeof resetsAt !== 'number' || !Number.isFinite(resetsAt)) return ''
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(new Date(resetsAt * 1000))
+}
+
+function formatResetDateCompact(resetsAt: number | null): string {
+  if (typeof resetsAt !== 'number' || !Number.isFinite(resetsAt)) return ''
+  const date = new Date(resetsAt * 1000)
+  return `${date.getMonth() + 1}月${date.getDate()}日`
+}
+
+function pickWeeklyQuotaWindow(quota: UiRateLimitSnapshot): UiRateLimitWindow | null {
+  const windows = [quota.primary, quota.secondary].filter((window): window is UiRateLimitWindow => window !== null)
+  const exactWeekly = windows.find((window) => window.windowMinutes === 7 * 24 * 60)
+  if (exactWeekly) return exactWeekly
+
+  const longerWindows = windows
+    .filter((window) => typeof window.windowMinutes === 'number' && window.windowMinutes >= 7 * 24 * 60)
+    .sort((first, second) => (first.windowMinutes ?? 0) - (second.windowMinutes ?? 0))
+
+  if (longerWindows[0]) return longerWindows[0]
+  return quota.secondary ?? null
+}
+
+function formatWindowSummary(window: UiRateLimitWindow): string {
+  const remainingPercent = Math.max(0, Math.min(100, 100 - Math.round(window.usedPercent)))
+  const span = formatWindowSpan(window.windowMinutes)
+  return span ? `${remainingPercent}% / ${span}` : `${remainingPercent}%`
+}
+
+function buildQuotaSummaryText(quota: UiRateLimitSnapshot | null): string {
+  if (!quota) return ''
+
+  const segments: string[] = []
+  const plan = formatPlanType(quota.planType)
+  if (plan) segments.push(plan)
+  if (quota.primary) segments.push(formatWindowSummary(quota.primary))
+  if (quota.secondary) segments.push(formatWindowSummary(quota.secondary))
+
+  const weeklyWindow = pickWeeklyQuotaWindow(quota)
+  const weeklyRefreshDate = formatResetDateCompact(weeklyWindow?.resetsAt ?? null)
+  if (weeklyRefreshDate) {
+    segments.push(weeklyRefreshDate)
+  }
+
+  if (segments.length === 0 && quota.credits?.unlimited) {
+    segments.push('Unlimited credits')
+  } else if (segments.length === 0 && quota.credits?.hasCredits && quota.credits.balance) {
+    segments.push(`${quota.credits.balance} credits`)
+  }
+
+  return segments.join(' · ')
+}
+
+function buildQuotaTooltipText(quota: UiRateLimitSnapshot | null): string {
+  if (!quota) return ''
+
+  const lines: string[] = []
+  const plan = formatPlanType(quota.planType)
+  if (plan) {
+    lines.push(`Plan: ${plan}`)
+  }
+
+  if (quota.primary) {
+    const reset = formatResetTime(quota.primary.resetsAt)
+    lines.push(`Primary window: ${formatWindowSummary(quota.primary)}${reset ? `, ${reset}` : ''}`)
+  }
+
+  if (quota.secondary) {
+    const reset = formatResetTime(quota.secondary.resetsAt)
+    lines.push(`Secondary window: ${formatWindowSummary(quota.secondary)}${reset ? `, ${reset}` : ''}`)
+  }
+
+  if (quota.credits?.unlimited) {
+    lines.push('Credits: unlimited')
+  } else if (quota.credits?.hasCredits && quota.credits.balance) {
+    lines.push(`Credits: ${quota.credits.balance}`)
+  }
+
+  const weeklyWindow = pickWeeklyQuotaWindow(quota)
+  if (weeklyWindow) {
+    const weeklyRefreshDate = formatResetDate(weeklyWindow.resetsAt)
+    if (weeklyRefreshDate) {
+      lines.push(`Weekly refresh: ${weeklyRefreshDate}`)
+    }
+  }
+
+  return lines.join('\n')
+}
+
+function buildQuotaWeeklyRefreshText(quota: UiRateLimitSnapshot | null): string {
+  if (!quota) return ''
+  const weeklyWindow = pickWeeklyQuotaWindow(quota)
+  if (!weeklyWindow) return ''
+  const weeklyRefreshDate = formatResetDate(weeklyWindow.resetsAt)
+  return weeklyRefreshDate ? `Weekly refresh ${weeklyRefreshDate}` : ''
+}
+
+function formatCompactTokenCount(value: number): string {
+  if (!Number.isFinite(value)) return '0'
+  const absValue = Math.abs(value)
+  if (absValue >= 1_000_000) {
+    const compact = absValue >= 10_000_000 ? (value / 1_000_000).toFixed(0) : (value / 1_000_000).toFixed(1)
+    return `${compact.replace(/\.0$/, '')}M`
+  }
+  if (absValue >= 1_000) {
+    const compact = absValue >= 100_000 ? (value / 1_000).toFixed(0) : (value / 1_000).toFixed(1)
+    return `${compact.replace(/\.0$/, '')}k`
+  }
+  return String(Math.round(value))
+}
+
+function formatBreakdownSummary(breakdown: UiTokenUsageBreakdown): string {
+  const nonCachedInput = Math.max(0, breakdown.inputTokens - breakdown.cachedInputTokens)
+  const parts = [
+    `${formatCompactTokenCount(breakdown.totalTokens)} total`,
+    `${formatCompactTokenCount(nonCachedInput)} input`,
+  ]
+  if (breakdown.cachedInputTokens > 0) {
+    parts.push(`${formatCompactTokenCount(breakdown.cachedInputTokens)} cached`)
+  }
+  if (breakdown.outputTokens > 0) {
+    parts.push(`${formatCompactTokenCount(breakdown.outputTokens)} output`)
+  }
+  if (breakdown.reasoningOutputTokens > 0) {
+    parts.push(`${formatCompactTokenCount(breakdown.reasoningOutputTokens)} reasoning`)
+  }
+  return parts.join(' · ')
+}
+
+function calculateContextPercentRemaining(tokensInContext: number, contextWindow: number): number {
+  // Mirror official Codex normalization so the first prompt does not look artificially "used".
+  if (!Number.isFinite(tokensInContext) || !Number.isFinite(contextWindow) || contextWindow <= 0) {
+    return 0
+  }
+  if (contextWindow <= CONTEXT_WINDOW_BASELINE_TOKENS) {
+    const remaining = Math.max(0, contextWindow - Math.max(0, tokensInContext))
+    return Math.max(0, Math.min(100, Math.round((remaining / contextWindow) * 100)))
+  }
+  const effectiveWindow = contextWindow - CONTEXT_WINDOW_BASELINE_TOKENS
+  const used = Math.max(0, tokensInContext - CONTEXT_WINDOW_BASELINE_TOKENS)
+  const remaining = Math.max(0, effectiveWindow - used)
+  return Math.max(0, Math.min(100, Math.round((remaining / effectiveWindow) * 100)))
+}
+
+function buildContextUsageView(
+  usage: UiThreadTokenUsage | null,
+): {
+    summaryText: string
+    tooltipText: string
+    percentRemaining: number
+    tone: 'healthy' | 'warning' | 'danger'
+  } | null {
+  if (!usage) return null
+
+  const contextWindow = usage.modelContextWindow ?? null
+  if (typeof contextWindow !== 'number' || !Number.isFinite(contextWindow) || contextWindow <= 0) return null
+
+  const tokensInContext = Math.max(0, usage.last.totalTokens)
+  const percentRemaining = calculateContextPercentRemaining(tokensInContext, contextWindow)
+  const percentUsed = Math.max(0, Math.min(100, 100 - percentRemaining))
+  const tone: 'healthy' | 'warning' | 'danger' = percentRemaining <= 15
+    ? 'danger'
+    : percentRemaining <= 35
+      ? 'warning'
+      : 'healthy'
+
+  return {
+    summaryText: `${percentRemaining}% · ${formatCompactTokenCount(tokensInContext)} / ${formatCompactTokenCount(contextWindow)}`,
+    tooltipText: [
+      `Context window: ${percentRemaining}% left (${percentUsed}% used)`,
+      `In context: ${tokensInContext.toLocaleString()} / ${contextWindow.toLocaleString()} tokens`,
+      `Last turn: ${formatBreakdownSummary(usage.last)}`,
+      `Session total: ${formatBreakdownSummary(usage.total)}`,
+    ].join('\n'),
+    percentRemaining,
+    tone,
+  }
+}
+
+function onSubmit(mode: 'steer' | 'queue' = 'steer'): void {
   const text = draft.value.trim()
   if (!canSubmit.value) return
   emit('submit', {
@@ -576,11 +961,14 @@ function onSubmit(mode: 'steer' | 'queue' = 'steer', options?: { rollbackLatestU
     fileAttachments: [...fileAttachments.value],
     skills: selectedSkills.value.map((s) => ({ name: s.name, path: s.path })),
     mode,
-    rollbackLatestUserTurn: options?.rollbackLatestUserTurn === true,
   })
   clearPersistedDraftForThread(props.activeThreadId)
   clearDraftState()
-  if (isAndroid) {
+  isComposerExpanded.value = false
+  folderUploadGroups.value = []
+  isAttachMenuOpen.value = false
+  closeFileMention()
+  if (isAndroid || isMobile.value) {
     inputRef.value?.blur()
     return
   }
@@ -601,14 +989,16 @@ function replaceDraftState(payload: ComposerDraftPayload): void {
   }))
   selectedSkills.value = payload.skills.map((skill) => (
     (props.skills ?? []).find((item) => item.path === skill.path)
-    ?? { name: skill.name, description: '', path: skill.path }
+    ?? { name: skill.name, displayName: undefined, description: '', path: skill.path }
   ))
   fileAttachments.value = payload.fileAttachments.map((attachment) => ({ ...attachment }))
   folderUploadGroups.value = []
   dictationFeedback.value = ''
+  attachmentBatchStats.value = null
+  pendingAttachmentCount.value = 0
   isAttachMenuOpen.value = false
-  isSlashMenuOpen.value = false
   closeFileMention()
+  attachmentSessionToken += 1
 }
 
 function clearDraftState(): void {
@@ -618,6 +1008,7 @@ function clearDraftState(): void {
     fileAttachments: [],
     skills: [],
   })
+  isComposerExpanded.value = false
 }
 
 function getDraftStorageKey(threadId: string): string {
@@ -707,8 +1098,37 @@ function onInterrupt(): void {
   emit('interrupt')
 }
 
+function updateComposerOverflowState(): void {
+  const input = inputRef.value
+  if (!input) {
+    isDraftOverflowing.value = false
+    return
+  }
+  isDraftOverflowing.value = input.scrollHeight > input.clientHeight + 2
+}
+
+function queueComposerOverflowMeasurement(): void {
+  if (composerOverflowMeasurementQueued) return
+  composerOverflowMeasurementQueued = true
+  void nextTick(() => {
+    composerOverflowMeasurementQueued = false
+    updateComposerOverflowState()
+  })
+}
+
+function toggleComposerExpanded(): void {
+  if (isInteractionDisabled.value) return
+  isComposerExpanded.value = !isComposerExpanded.value
+  queueComposerOverflowMeasurement()
+  void nextTick(() => inputRef.value?.focus())
+}
+
 function onModelSelect(value: string): void {
   emit('update:selected-model', value)
+}
+
+function toggleCollaborationMode(): void {
+  emit('update:selected-collaboration-mode', isPlanModeSelected.value ? 'default' : 'plan')
 }
 
 function onReasoningEffortSelect(value: string): void {
@@ -724,10 +1144,6 @@ function onDictationToggle(): void {
   if (!props.dictationClickToToggle) return
   if (dictationFeedback.value) {
     dictationFeedback.value = ''
-  }
-  if (dictationState.value === 'idle') {
-    dictationShouldRollbackLatestUserTurn =
-      props.isTurnInProgress === true && activeInProgressMode.value === 'steer'
   }
   toggleRecording()
 }
@@ -748,8 +1164,6 @@ function onDictationPressStart(event: PointerEvent): void {
   if (dictationFeedback.value) {
     dictationFeedback.value = ''
   }
-  dictationShouldRollbackLatestUserTurn =
-    props.isTurnInProgress === true && activeInProgressMode.value === 'steer'
   window.addEventListener('pointerup', onDictationPressEnd)
   window.addEventListener('pointercancel', onDictationPressEnd)
   window.addEventListener('blur', onDictationPressEnd)
@@ -791,6 +1205,18 @@ function removeSkill(path: string): void {
   selectedSkills.value = selectedSkills.value.filter((s) => s.path !== path)
 }
 
+function skillMarkdownPath(path: string): string {
+  const trimmed = path.trim()
+  if (!trimmed) return ''
+  return trimmed.endsWith('/SKILL.md') ? trimmed : `${trimmed.replace(/\/+$/, '')}/SKILL.md`
+}
+
+function openSkillMarkdown(skill: SkillItem): void {
+  const markdownPath = skillMarkdownPath(skill.path)
+  if (!markdownPath || typeof window === 'undefined') return
+  window.open(`/codex-local-browse${encodeURI(markdownPath)}`, '_blank', 'noopener,noreferrer')
+}
+
 function removeFileAttachment(fsPath: string): void {
   fileAttachments.value = fileAttachments.value.filter((a) => a.fsPath !== fsPath)
 }
@@ -821,29 +1247,163 @@ function isImageFile(file: File): boolean {
   return /\.(png|jpe?g|gif|webp)$/i.test(file.name)
 }
 
-function addFiles(files: FileList | null): void {
-  if (!files || files.length === 0) return
-  const generation = draftGeneration.value
-  for (const file of Array.from(files)) {
+function normalizeSelectedFiles(files: FileList | File[] | null | undefined): File[] {
+  if (!files) return []
+  return Array.from(files)
+}
+
+function formatAttachmentFileCount(count: number): string {
+  return count === 1 ? '1 file' : `${count} files`
+}
+
+function beginAttachmentWork(sessionToken: number): boolean {
+  if (sessionToken !== attachmentSessionToken) return false
+  pendingAttachmentCount.value += 1
+  return true
+}
+
+function finishAttachmentWork(sessionToken: number): void {
+  if (sessionToken !== attachmentSessionToken) return
+  pendingAttachmentCount.value = Math.max(0, pendingAttachmentCount.value - 1)
+}
+
+function beginAttachmentBatch(total: number): void {
+  if (total <= 0) return
+  const current = attachmentBatchStats.value
+  const completed = current ? current.succeeded + current.failed : 0
+  if (!current || completed >= current.total) {
+    attachmentBatchStats.value = { total, succeeded: 0, failed: 0 }
+    return
+  }
+  attachmentBatchStats.value = {
+    ...current,
+    total: current.total + total,
+  }
+}
+
+function recordAttachmentBatchResult(result: 'success' | 'failure'): void {
+  const current = attachmentBatchStats.value
+  if (!current) return
+  attachmentBatchStats.value = {
+    ...current,
+    succeeded: current.succeeded + (result === 'success' ? 1 : 0),
+    failed: current.failed + (result === 'failure' ? 1 : 0),
+  }
+}
+
+function createAttachmentId(): string {
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
+function createPastedImageName(file: File): string {
+  const now = new Date()
+  const timestamp = [
+    now.getFullYear(),
+    String(now.getMonth() + 1).padStart(2, '0'),
+    String(now.getDate()).padStart(2, '0'),
+    String(now.getHours()).padStart(2, '0'),
+    String(now.getMinutes()).padStart(2, '0'),
+    String(now.getSeconds()).padStart(2, '0'),
+  ].join('-')
+  const ext = file.type.startsWith('image/')
+    ? file.type.slice('image/'.length).replace(/[^a-z0-9]+/gi, '') || 'png'
+    : 'png'
+  return `pasted-image-${timestamp}.${ext}`
+}
+
+function createPastedTextFileName(): string {
+  const now = new Date()
+  const timestamp = [
+    now.getFullYear(),
+    String(now.getMonth() + 1).padStart(2, '0'),
+    String(now.getDate()).padStart(2, '0'),
+    String(now.getHours()).padStart(2, '0'),
+    String(now.getMinutes()).padStart(2, '0'),
+    String(now.getSeconds()).padStart(2, '0'),
+  ].join('-')
+  return `pasted-text-${timestamp}.txt`
+}
+
+function ensureFileName(file: File): File {
+  if (file.name.trim()) return file
+  return new File([file], createPastedImageName(file), {
+    type: file.type || 'image/png',
+    lastModified: Date.now(),
+  })
+}
+
+async function attachImageFile(file: File, sessionToken: number): Promise<void> {
+  if (!beginAttachmentWork(sessionToken)) return
+  try {
+    const normalizedFile = ensureFileName(file)
+    const serverPath = await uploadFile(normalizedFile)
+    if (sessionToken !== attachmentSessionToken) return
+    if (!serverPath) {
+      recordAttachmentBatchResult('failure')
+      return
+    }
+    selectedImages.value = [
+      ...selectedImages.value,
+      {
+        id: createAttachmentId(),
+        name: normalizedFile.name,
+        url: `/codex-local-image?path=${encodeURIComponent(serverPath)}`,
+      },
+    ]
+    recordAttachmentBatchResult('success')
+  } catch {
+    if (sessionToken === attachmentSessionToken) {
+      recordAttachmentBatchResult('failure')
+    }
+  } finally {
+    finishAttachmentWork(sessionToken)
+  }
+}
+
+async function attachUploadedFile(file: File, sessionToken: number): Promise<void> {
+  if (!beginAttachmentWork(sessionToken)) return
+  try {
+    const serverPath = await uploadFile(file)
+    if (sessionToken !== attachmentSessionToken) return
+    if (!serverPath) {
+      recordAttachmentBatchResult('failure')
+      return
+    }
+    addFileAttachment(serverPath)
+    recordAttachmentBatchResult('success')
+  } catch {
+    if (sessionToken === attachmentSessionToken) {
+      recordAttachmentBatchResult('failure')
+    }
+  } finally {
+    finishAttachmentWork(sessionToken)
+  }
+}
+
+function attachIncomingFiles(files: FileList | File[] | null | undefined): void {
+  const normalizedFiles = normalizeSelectedFiles(files)
+  if (normalizedFiles.length === 0) return
+  beginAttachmentBatch(normalizedFiles.length)
+  isAttachMenuOpen.value = false
+  closeFileMention()
+  const sessionToken = attachmentSessionToken
+  for (const file of normalizedFiles) {
     if (isImageFile(file)) {
-      const reader = new FileReader()
-      reader.onload = () => {
-        if (generation !== draftGeneration.value) return
-        if (typeof reader.result !== 'string') return
-        selectedImages.value.push({
-          id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-          name: file.name,
-          url: reader.result,
-        })
-      }
-      reader.readAsDataURL(file)
+      void attachImageFile(file, sessionToken)
     } else {
-      void uploadFile(file).then((serverPath) => {
-        if (generation !== draftGeneration.value) return
-        if (serverPath) addFileAttachment(serverPath)
-      }).catch(() => {})
+      void attachUploadedFile(file, sessionToken)
     }
   }
+}
+
+function resetDragState(): void {
+  dragDepth = 0
+  isDragActive.value = false
+}
+
+function hasFilePayload(dataTransfer: DataTransfer | null): boolean {
+  if (!dataTransfer) return false
+  return Array.from(dataTransfer.types ?? []).includes('Files')
 }
 
 async function addFolderFiles(files: FileList | null): Promise<void> {
@@ -901,14 +1461,14 @@ function clearInputValue(inputRefEl: HTMLInputElement | null): void {
 
 function onPhotoLibraryChange(event: Event): void {
   const input = event.target as HTMLInputElement | null
-  addFiles(input?.files ?? null)
+  attachIncomingFiles(input?.files ?? null)
   clearInputValue(input)
   isAttachMenuOpen.value = false
 }
 
 function onCameraCaptureChange(event: Event): void {
   const input = event.target as HTMLInputElement | null
-  addFiles(input?.files ?? null)
+  attachIncomingFiles(input?.files ?? null)
   clearInputValue(input)
   isAttachMenuOpen.value = false
 }
@@ -920,15 +1480,74 @@ function onFolderPickerChange(event: Event): void {
   isAttachMenuOpen.value = false
 }
 
+function onInputDragEnter(event: DragEvent): void {
+  if (isInteractionDisabled.value || !hasFilePayload(event.dataTransfer)) return
+  event.preventDefault()
+  dragDepth += 1
+  isDragActive.value = true
+}
+
+function onInputDragOver(event: DragEvent): void {
+  if (isInteractionDisabled.value || !hasFilePayload(event.dataTransfer)) return
+  event.preventDefault()
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = 'copy'
+  }
+  isDragActive.value = true
+}
+
+function onInputDragLeave(event: DragEvent): void {
+  if (!isDragActive.value) return
+  event.preventDefault()
+  dragDepth = Math.max(0, dragDepth - 1)
+  if (dragDepth === 0) {
+    resetDragState()
+  }
+}
+
+function onInputDrop(event: DragEvent): void {
+  if (isInteractionDisabled.value || !hasFilePayload(event.dataTransfer)) return
+  event.preventDefault()
+  resetDragState()
+  attachIncomingFiles(event.dataTransfer?.files ?? null)
+}
+
+function onWindowDragCleanup(): void {
+  if (!isDragActive.value && dragDepth === 0) return
+  resetDragState()
+}
+
+function onInputPaste(event: ClipboardEvent): void {
+  if (isInteractionDisabled.value) return
+  const plainText = event.clipboardData?.getData('text/plain') ?? ''
+  if (plainText.length >= PASTED_TEXT_FILE_THRESHOLD) {
+    event.preventDefault()
+    const textFile = new File([plainText], createPastedTextFileName(), {
+      type: 'text/plain',
+      lastModified: Date.now(),
+    })
+    attachIncomingFiles([textFile])
+    return
+  }
+  const items = Array.from(event.clipboardData?.items ?? [])
+  if (items.length === 0) return
+  const hasPlainText = plainText.length > 0
+  const imageFiles = items
+    .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => file instanceof File)
+  if (imageFiles.length === 0) return
+  if (!hasPlainText) {
+    event.preventDefault()
+  }
+  attachIncomingFiles(imageFiles)
+}
+
 function onInputChange(): void {
   if (dictationFeedback.value) {
     dictationFeedback.value = ''
   }
-  const text = draft.value
-  const shouldShowSlashMenu = text.startsWith('/')
-  if (shouldShowSlashMenu !== isSlashMenuOpen.value) {
-    isSlashMenuOpen.value = shouldShowSlashMenu
-  }
+  queueComposerOverflowMeasurement()
   updateFileMentionState()
 }
 
@@ -975,23 +1594,6 @@ function onInputKeydown(event: KeyboardEvent): void {
     onSubmit(props.isTurnInProgress ? activeInProgressMode.value : 'steer')
     return
   }
-
-  if (isSlashMenuOpen.value) {
-    if (event.key === 'Escape') {
-      event.preventDefault()
-      closeSlashMenu()
-      return
-    }
-    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-      event.preventDefault()
-      return
-    }
-  }
-}
-
-function closeSlashMenu(): void {
-  isSlashMenuOpen.value = false
-  inputRef.value?.focus()
 }
 
 function closeFileMention(): void {
@@ -1064,7 +1666,61 @@ function applyFileMention(suggestion: ComposerFileSuggestion): void {
 function hydrateDraft(payload: ComposerDraftPayload): void {
   cancelDictation()
   replaceDraftState(payload)
+  void nextTick(() => {
+    inputRef.value?.focus()
+    updateComposerOverflowState()
+  })
+}
+
+function appendTextToDraft(text: string): void {
+  const nextText = text.trim()
+  if (!nextText) return
+  cancelDictation()
+  if (draft.value.trim().length > 0) {
+    draft.value = `${draft.value.trimEnd()}\n${nextText}`
+  } else {
+    draft.value = nextText
+  }
   nextTick(() => inputRef.value?.focus())
+}
+
+async function reloadPrompts(): Promise<void> {
+  savedPrompts.value = await getComposerPrompts()
+}
+
+function promptOptionValue(path: string): string {
+  return `${PROMPT_OPTION_PREFIX}${path}`
+}
+
+function promptPathFromOptionValue(value: string): string | null {
+  return value.startsWith(PROMPT_OPTION_PREFIX) ? value.slice(PROMPT_OPTION_PREFIX.length) : null
+}
+
+async function onCreatePrompt(): Promise<void> {
+  const name = window.prompt(t('Prompt name'))?.trim() ?? ''
+  if (!name) return
+  const content = window.prompt(t('Prompt content')) ?? ''
+  if (!content.trim()) return
+  const created = await createComposerPrompt(name, content)
+  if (!created) return
+  await reloadPrompts()
+  appendTextToDraft(created.content)
+}
+
+async function onRemovePrompt(path: string): Promise<void> {
+  const promptPath = promptPathFromOptionValue(path) ?? path
+  const target = savedPrompts.value.find((prompt) => prompt.path === promptPath)
+  const confirmed = window.confirm(target ? `${t('Remove prompt')} "${target.name}"?` : t('Remove prompt'))
+  if (!confirmed) return
+  const removed = await removeComposerPrompt(promptPath)
+  if (!removed) return
+  await reloadPrompts()
+}
+
+function onPromptDropdownToggle(path: string): void {
+  const prompt = savedPrompts.value.find((entry) => entry.path === path)
+  if (!prompt) return
+  appendTextToDraft(prompt.content)
 }
 
 function getMentionFileName(path: string): string {
@@ -1109,16 +1765,27 @@ function isMarkdownFile(path: string): boolean {
   return ext === 'md' || ext === 'mdx'
 }
 
-function onSlashSkillSelect(skill: SkillItem): void {
-  if (!selectedSkills.value.some((s) => s.path === skill.path)) {
-    selectedSkills.value = [...selectedSkills.value, skill]
+function skillSourceBadge(skill: SkillItem): SkillSourceBadge {
+  const path = skill.path.toLowerCase()
+  if (path.includes('/plugins/cache/')) {
+    return { badge: 'P', badgeLabel: 'Plugin', badgeTone: 'plugin' }
   }
-  draft.value = draft.value.startsWith('/') ? '' : draft.value
-  isSlashMenuOpen.value = false
-  inputRef.value?.focus()
+  if (skill.scope === 'repo') {
+    return { badge: 'R', badgeLabel: 'Repo', badgeTone: 'repo' }
+  }
+  if (skill.scope === 'system') {
+    return { badge: 'S', badgeLabel: 'System', badgeTone: 'system' }
+  }
+  return { badge: 'U', badgeLabel: 'User', badgeTone: 'user' }
 }
 
 function onSkillDropdownToggle(path: string, checked: boolean): void {
+  const promptPath = promptPathFromOptionValue(path)
+  if (promptPath) {
+    onPromptDropdownToggle(promptPath)
+    return
+  }
+
   if (checked) {
     const skill = (props.skills ?? []).find((s) => s.path === path)
     if (skill && !selectedSkills.value.some((s) => s.path === path)) {
@@ -1140,15 +1807,24 @@ function onDocumentClick(event: MouseEvent): void {
 
 onMounted(() => {
   document.addEventListener('click', onDocumentClick)
+  window.addEventListener('drop', onWindowDragCleanup)
+  window.addEventListener('dragend', onWindowDragCleanup)
+  window.addEventListener('blur', onWindowDragCleanup)
+  void reloadPrompts()
+  queueComposerOverflowMeasurement()
 })
 
 defineExpose<ThreadComposerExposed>({
   hydrateDraft,
+  appendTextToDraft,
   hasUnsavedDraft: () => hasUnsavedDraft.value,
 })
 
 onBeforeUnmount(() => {
   document.removeEventListener('click', onDocumentClick)
+  window.removeEventListener('drop', onWindowDragCleanup)
+  window.removeEventListener('dragend', onWindowDragCleanup)
+  window.removeEventListener('blur', onWindowDragCleanup)
   window.removeEventListener('pointerup', onDictationPressEnd)
   window.removeEventListener('pointercancel', onDictationPressEnd)
   window.removeEventListener('blur', onDictationPressEnd)
@@ -1180,6 +1856,10 @@ watch([draft, selectedImages, fileAttachments, selectedSkills], () => {
   persistDraftForThread(lastActiveThreadId, getCurrentDraftPayload())
 }, { deep: true })
 
+watch(draft, () => {
+  queueComposerOverflowMeasurement()
+})
+
 watch(
   () => props.cwd,
   () => {
@@ -1196,27 +1876,30 @@ watch(
   },
 )
 
-watch(
-  () => props.prependDraftRequest?.id,
-  () => {
-    const text = props.prependDraftRequest?.text?.trim() ?? ''
-    if (!text) return
-    draft.value = draft.value ? `${text}\n${draft.value}` : text
-    onInputChange()
-    nextTick(() => inputRef.value?.focus())
-  },
-)
+
 </script>
 
 <style scoped>
 @reference "tailwindcss";
 
 .thread-composer {
-  @apply w-full max-w-175 mx-auto px-2 sm:px-6;
+  @apply w-full max-w-[min(var(--chat-column-max,72rem),100%)] mx-auto;
+}
+
+.thread-composer:has(.thread-composer-input-wrap--expanded) {
+  @apply fixed inset-0 z-50 max-w-none bg-white/95 p-3 sm:p-6;
 }
 
 .thread-composer-shell {
   @apply relative rounded-2xl border border-zinc-300 bg-white p-2 sm:p-3 shadow-sm;
+}
+
+.thread-composer:has(.thread-composer-input-wrap--expanded) .thread-composer-shell {
+  @apply mx-auto flex h-full w-full max-w-[min(var(--chat-column-max,72rem),100%)] flex-col shadow-2xl;
+}
+
+.thread-composer-shell--drag-active {
+  @apply border-zinc-900 shadow-md;
 }
 
 .thread-composer-shell--no-top-radius {
@@ -1292,15 +1975,70 @@ watch(
 }
 
 .thread-composer-skill-chip-name {
-  @apply font-medium;
+  @apply min-w-0 max-w-[12rem] truncate border-0 bg-transparent p-0 text-left font-medium text-inherit underline-offset-2 transition hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-emerald-500;
 }
 
 .thread-composer-skill-chip-remove {
   @apply ml-0.5 inline-flex h-3.5 w-3.5 items-center justify-center rounded-full border-0 bg-transparent text-emerald-500 transition hover:bg-emerald-200 hover:text-emerald-700 text-xs leading-none p-0;
 }
 
+.thread-composer-rate-limit {
+  @apply mb-1.5 px-1 text-[11px] leading-5 text-zinc-500;
+}
+
+.thread-composer-rate-limit-row {
+  @apply flex min-w-0 items-center gap-x-1.5 gap-y-1;
+}
+
+.thread-composer-rate-limit-value {
+  @apply min-w-0 flex-1 truncate;
+}
+
+.thread-composer-context-usage-inline {
+  --context-usage-accent: rgb(34 197 94);
+  @apply ml-auto inline-flex min-w-0 max-w-[56%] items-center gap-2 text-right;
+}
+
+.thread-composer-context-usage-inline.is-warning {
+  --context-usage-accent: rgb(245 158 11);
+}
+
+.thread-composer-context-usage-inline.is-danger {
+  --context-usage-accent: rgb(239 68 68);
+}
+
+.thread-composer-context-usage-inline-value {
+  @apply min-w-0 truncate font-medium tabular-nums;
+  color: var(--context-usage-accent);
+}
+
+.thread-composer-context-usage-inline-bar {
+  @apply block h-1.5 w-14 shrink-0 overflow-hidden rounded-full bg-zinc-200/80;
+}
+
+.thread-composer-context-usage-inline-bar-fill {
+  @apply block h-full rounded-full transition-[width] duration-200 ease-out;
+  background: var(--context-usage-accent);
+}
+
 .thread-composer-input-wrap {
   @apply relative;
+}
+
+.thread-composer-input-wrap--expanded {
+  @apply min-h-0 flex-1;
+}
+
+.thread-composer-input-wrap--drag-active {
+  @apply rounded-xl bg-zinc-50;
+}
+
+.thread-composer-drop-overlay {
+  @apply pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-xl border border-dashed border-zinc-900 bg-white/90;
+}
+
+.thread-composer-drop-overlay-copy {
+  @apply rounded-full bg-zinc-900 px-3 py-1 text-xs font-medium text-white shadow-sm;
 }
 
 .thread-composer-file-mentions {
@@ -1356,8 +2094,11 @@ watch(
 }
 
 .thread-composer-input {
-  @apply w-full min-w-0 min-h-10 sm:min-h-11 max-h-40 rounded-xl border-0 bg-transparent px-1 py-2 text-sm text-zinc-900 outline-none transition resize-none overflow-y-auto;
-  overscroll-behavior-y: contain;
+  @apply w-full min-w-0 min-h-10 sm:min-h-11 max-h-40 rounded-xl border-0 bg-transparent px-1 py-2 pr-10 text-sm text-zinc-900 outline-none transition resize-none overflow-y-auto;
+}
+
+.thread-composer-input-wrap--expanded .thread-composer-input {
+  @apply h-full max-h-none pr-12 text-base leading-6;
 }
 
 .thread-composer-input:focus {
@@ -1368,8 +2109,16 @@ watch(
   @apply bg-zinc-100 text-zinc-500 cursor-not-allowed;
 }
 
+.thread-composer-expand {
+  @apply absolute right-0.5 top-0.5 inline-flex h-8 w-8 items-center justify-center rounded-full border-0 bg-zinc-100 text-zinc-500 shadow-sm transition hover:bg-zinc-200 hover:text-zinc-900 disabled:cursor-not-allowed disabled:text-zinc-400;
+}
+
+.thread-composer-expand-icon {
+  @apply h-[18px] w-[18px];
+}
+
 .thread-composer-controls {
-  @apply relative mt-2 sm:mt-3 flex items-center gap-2 sm:gap-4 overflow-visible;
+  @apply relative mt-2 sm:mt-3 flex items-center gap-2 sm:gap-4 overflow-visible pb-px;
 }
 
 .thread-composer-controls--recording {
@@ -1381,7 +2130,7 @@ watch(
 }
 
 .thread-composer-attach-trigger {
-  @apply inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-none border-0 bg-transparent text-xl leading-none text-zinc-700 transition hover:text-zinc-900 disabled:cursor-not-allowed disabled:text-zinc-400;
+  @apply inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-none border-0 bg-transparent pb-px text-xl leading-tight text-zinc-700 transition hover:text-zinc-900 disabled:cursor-not-allowed disabled:text-zinc-400;
 }
 
 .thread-composer-attach-menu {
@@ -1465,6 +2214,7 @@ watch(
   @apply truncate;
 }
 
+
 .thread-composer-actions {
   @apply ml-auto flex min-w-0 items-center gap-2;
 }
@@ -1520,6 +2270,10 @@ watch(
 
 .thread-composer-stop-icon {
   @apply h-5 w-5;
+}
+
+.thread-composer-stop-spinner {
+  @apply h-5 w-5 rounded-full border-2 border-current border-t-transparent animate-spin;
 }
 
 .thread-composer-hidden-input {

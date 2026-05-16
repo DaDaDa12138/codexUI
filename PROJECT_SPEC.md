@@ -309,15 +309,15 @@ Bidirectional sync between `selectedThreadId` state and URL is handled via Vue `
 
 | Command | Description |
 |---|---|
-| `npm run dev` | Start Vite dev server (port 5173) |
-| `npm run build` | Type-check + build frontend + build CLI |
-| `npm run build:frontend` | `vue-tsc --noEmit && vite build` |
-| `npm run build:cli` | `tsup` (builds CLI to `dist-cli/`) |
-| `npm run preview` | Preview production build |
+| `pnpm run dev` | Install deps + start Vite dev server (port 5173) |
+| `pnpm run build` | Type-check + build frontend + build CLI |
+| `pnpm run build:frontend` | `vue-tsc --noEmit && vite build` |
+| `pnpm run build:cli` | `tsup` (builds CLI to `dist-cli/`) |
+| `pnpm run preview` | Preview production build |
 
 ### Dev Mode
 
-`npm run dev` starts a Vite dev server that includes the codex bridge as middleware. The bridge spawns `codex app-server` as a child process. The frontend calls `/codex-api/*` endpoints on the same origin.
+`pnpm run dev` installs dependencies and starts a Vite dev server that includes the codex bridge as middleware. The bridge spawns `codex app-server` as a child process. The frontend calls `/codex-api/*` endpoints on the same origin.
 
 ### Production Mode
 
@@ -325,11 +325,11 @@ Bidirectional sync between `selectedThreadId` state and URL is handled via Vue `
 npx codex-web-local [--port 5999] [--password mypass] [--no-password]
 ```
 
-The CLI starts an Express server that serves the built frontend from `dist/` and uses the same bridge middleware. Password authentication is enabled by default with an auto-generated password printed to the console.
+The CLI starts an Express server that serves the built frontend from `dist/` and uses the same bridge middleware. Password authentication is enabled by default. When a password is auto-generated, it is written to `$CODEX_HOME/codexui-password` with `0600` permissions and startup output prints only that file path.
 
 ### Auth (Production)
 
-- Default: auto-generated password printed to console on startup
+- Default: auto-generated password saved to `$CODEX_HOME/codexui-password` on startup
 - Login: POST `/auth/login` with `{ password }` body
 - Session: HttpOnly cookie `codex_web_local_token`
 - Uses constant-time comparison to prevent timing attacks

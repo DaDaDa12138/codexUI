@@ -1,17 +1,20 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import type { IncomingMessage } from 'node:http'
+import { homedir } from 'node:os'
+import { dirname, join } from 'node:path'
 import type { RequestHandler, Request, Response, NextFunction } from 'express'
 
-const TOKEN_COOKIE = 'codex_web_local_token'
+const TOKEN_COOKIE = 'portal_session'
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000
+const SESSION_STORE_FILE = 'webui-auth-sessions.json'
+const MAX_PERSISTED_TOKENS = 128
 
-function isLocalhostRequest(req: Request): boolean {
-  const remote = req.socket.remoteAddress ?? ''
-  if (remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1') {
-    return true
-  }
-
-  const host = (req.headers.host ?? '').toLowerCase()
-  return host.startsWith('localhost:') || host === 'localhost' || host.startsWith('127.0.0.1:')
+type PersistedAuthState = {
+  tokens?: Array<{
+    value?: unknown
+    expiresAt?: unknown
+  }>
 }
 
 function constantTimeCompare(a: string, b: string): boolean {
@@ -43,20 +46,128 @@ function isLocalhostHost(host: string): boolean {
   return normalized.startsWith('localhost:') || normalized === 'localhost' || normalized.startsWith('127.0.0.1:')
 }
 
+function isIPv4Octet(value: string): boolean {
+  if (!/^\d{1,3}$/.test(value)) return false
+  const parsed = Number.parseInt(value, 10)
+  return parsed >= 0 && parsed <= 255
+}
+
+function isTrustedTailscaleIPv4(remote: string): boolean {
+  const normalized = remote.startsWith('::ffff:') ? remote.slice('::ffff:'.length) : remote
+  const parts = normalized.split('.')
+  if (parts.length !== 4 || !parts.every(isIPv4Octet)) {
+    return false
+  }
+
+  const first = Number.parseInt(parts[0] ?? '', 10)
+  const second = Number.parseInt(parts[1] ?? '', 10)
+  return first === 100 && second >= 64 && second <= 127
+}
+
+function isTrustedTailscaleIPv6(remote: string): boolean {
+  const normalized = remote.toLowerCase()
+  return normalized === 'fd7a:115c:a1e0::1' || normalized.startsWith('fd7a:115c:a1e0:')
+}
+
+function isTrustedTailscaleRemote(remote: string): boolean {
+  return isTrustedTailscaleIPv4(remote) || isTrustedTailscaleIPv6(remote)
+}
+
+function getCodexHomeDir(): string {
+  const codexHome = process.env.CODEX_HOME?.trim()
+  return codexHome && codexHome.length > 0 ? codexHome : join(homedir(), '.codex')
+}
+
+function getSessionStorePath(): string {
+  return join(getCodexHomeDir(), SESSION_STORE_FILE)
+}
+
+function readPersistedSessions(): Map<string, number> {
+  const sessionStorePath = getSessionStorePath()
+  if (!existsSync(sessionStorePath)) return new Map()
+
+  try {
+    const raw = readFileSync(sessionStorePath, 'utf8')
+    const parsed = JSON.parse(raw) as PersistedAuthState
+    const now = Date.now()
+    const sessions = new Map<string, number>()
+    for (const entry of parsed.tokens ?? []) {
+      const token = typeof entry?.value === 'string' ? entry.value : ''
+      const expiresAt = typeof entry?.expiresAt === 'number' ? entry.expiresAt : 0
+      if (!token || !Number.isFinite(expiresAt) || expiresAt <= now) continue
+      sessions.set(token, expiresAt)
+    }
+    return sessions
+  } catch {
+    return new Map()
+  }
+}
+
+function persistSessions(validTokens: Map<string, number>): void {
+  const sessionStorePath = getSessionStorePath()
+  mkdirSync(dirname(sessionStorePath), { recursive: true })
+
+  const tokens = Array.from(validTokens.entries())
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, MAX_PERSISTED_TOKENS)
+    .map(([value, expiresAt]) => ({ value, expiresAt }))
+  const tmpPath = `${sessionStorePath}.tmp`
+  writeFileSync(tmpPath, `${JSON.stringify({ tokens }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
+  renameSync(tmpPath, sessionStorePath)
+}
+
+function tryPersistSessions(validTokens: Map<string, number>): void {
+  try {
+    persistSessions(validTokens)
+  } catch (error) {
+    console.warn('[auth] failed to persist login sessions:', error)
+  }
+}
+
+function pruneExpiredSessions(validTokens: Map<string, number>): boolean {
+  const now = Date.now()
+  let changed = false
+  for (const [token, expiresAt] of validTokens.entries()) {
+    if (expiresAt > now) continue
+    validTokens.delete(token)
+    changed = true
+  }
+  return changed
+}
+
+function buildSessionCookie(token: string, expiresAt: number): string {
+  const maxAgeSeconds = Math.max(0, Math.floor((expiresAt - Date.now()) / 1000))
+  return [
+    `${TOKEN_COOKIE}=${token}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    `Max-Age=${String(maxAgeSeconds)}`,
+    `Expires=${new Date(expiresAt).toUTCString()}`,
+  ].join('; ')
+}
+
 function isAuthorizedByRequestLike(
   remoteAddress: string | undefined,
   hostHeader: string | undefined,
   cookieHeader: string | undefined,
-  validTokens: Set<string>,
+  validTokens: Map<string, number>,
 ): boolean {
   const remote = remoteAddress ?? ''
-  if (isLocalhostRemote(remote) || isLocalhostHost(hostHeader ?? '')) {
+  // SSH reverse tunnels terminate on loopback, so remoteAddress alone is not enough
+  // to prove this is a direct local browser request.
+  if (isLocalhostRemote(remote) && isLocalhostHost(hostHeader ?? '')) {
+    return true
+  }
+  if (isTrustedTailscaleRemote(remote)) {
     return true
   }
 
   const cookies = parseCookies(cookieHeader)
   const token = cookies[TOKEN_COOKIE]
-  return Boolean(token && validTokens.has(token))
+  if (!token) return false
+  const expiresAt = validTokens.get(token)
+  return typeof expiresAt === 'number' && expiresAt > Date.now()
 }
 
 const LOGIN_PAGE_HTML = `<!DOCTYPE html>
@@ -64,7 +175,7 @@ const LOGIN_PAGE_HTML = `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Codex Web Local &mdash; Login</title>
+<title>Codex Web</title>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0a0a0a;color:#e5e5e5;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:1rem}
@@ -80,7 +191,7 @@ button:hover{background:#2563eb}
 </head>
 <body>
 <div class="card">
-<h1>Codex Web Local</h1>
+<h1>Codex Web</h1>
 <form id="f">
 <label for="pw">Password</label>
 <input id="pw" name="password" type="password" autocomplete="current-password" autofocus required>
@@ -111,9 +222,16 @@ export type AuthSession = {
 }
 
 export function createAuthSession(password: string): AuthSession {
-  const validTokens = new Set<string>()
+  const validTokens = readPersistedSessions()
+  if (pruneExpiredSessions(validTokens)) {
+    tryPersistSessions(validTokens)
+  }
 
   const middleware: RequestHandler = (req: Request, res: Response, next: NextFunction): void => {
+    if (pruneExpiredSessions(validTokens)) {
+      tryPersistSessions(validTokens)
+    }
+
     if (isAuthorizedByRequestLike(req.socket.remoteAddress, req.headers.host, req.headers.cookie, validTokens)) {
       next()
       return
@@ -125,25 +243,46 @@ export function createAuthSession(password: string): AuthSession {
       req.setEncoding('utf8')
       req.on('data', (chunk: string) => { body += chunk })
       req.on('end', () => {
+        let parsed: { password?: string }
         try {
-          const parsed = JSON.parse(body) as { password?: string }
-          const provided = typeof parsed.password === 'string' ? parsed.password : ''
-
-          if (!constantTimeCompare(provided, password)) {
-            res.status(401).json({ error: 'Invalid password' })
-            return
-          }
-
-          const token = randomBytes(32).toString('hex')
-          validTokens.add(token)
-
-          res.setHeader('Set-Cookie', `${TOKEN_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict`)
-          res.json({ ok: true })
+          parsed = JSON.parse(body) as { password?: string }
         } catch {
           res.status(400).json({ error: 'Invalid request body' })
+          return
+        }
+
+        const provided = typeof parsed.password === 'string' ? parsed.password : ''
+        if (!constantTimeCompare(provided, password)) {
+          res.status(401).json({ error: 'Invalid password' })
+          return
+        }
+
+        try {
+          const token = randomBytes(32).toString('hex')
+          const expiresAt = Date.now() + SESSION_TTL_MS
+          validTokens.set(token, expiresAt)
+          tryPersistSessions(validTokens)
+          res.setHeader('Set-Cookie', buildSessionCookie(token, expiresAt))
+          res.json({ ok: true })
+        } catch {
+          res.status(500).json({ error: 'Failed to create login session' })
         }
       })
       return
+    }
+
+    // Handle one-click auth links like /password=<value>
+    if (req.method === 'GET' && req.path.startsWith('/password=')) {
+      const provided = req.path.slice('/password='.length)
+      if (constantTimeCompare(provided, password)) {
+        const token = randomBytes(32).toString('hex')
+        const expiresAt = Date.now() + SESSION_TTL_MS
+        validTokens.set(token, expiresAt)
+        tryPersistSessions(validTokens)
+        res.setHeader('Set-Cookie', buildSessionCookie(token, expiresAt))
+        res.redirect(302, '/')
+        return
+      }
     }
 
     // No valid session — serve login page

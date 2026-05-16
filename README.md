@@ -21,6 +21,7 @@
 ```
 
 ---
+<img width="1366" height="900" alt="image" src="https://github.com/user-attachments/assets/1a3578ba-add8-49a2-88b4-08195a7f0140" />
 
 ## 🤯 What Is This?
 **`codexapp`** is a lightweight bridge that gives you a browser-accessible UI for Codex app-server workflows.
@@ -50,6 +51,12 @@ cloudflared tunnel --url http://localhost:<port>
 
 It prints the tunnel URL, terminal QR code, and password together in startup output.  
 Use `--no-tunnel` to disable this behavior.
+
+If you are using a provider or AI gateway that is already authenticated and do not want `codexapp` to force `codex login` during startup, use:
+
+```bash
+npx codexapp --no-login
+```
 
 ### Linux 🐧
 ```bash
@@ -90,8 +97,8 @@ If you want to use codexUI from iPhone or iPad Safari, serving it over HTTPS is 
 A practical private setup is to run codexUI locally and publish it inside your tailnet with Tailscale Serve:
 
 ```powershell
-npx codexapp --no-tunnel --port 5999
-tailscale serve --bg 5999
+npx codexapp --no-tunnel --port 5900
+tailscale serve --bg 5900
 ```
 
 Then open:
@@ -136,15 +143,32 @@ Set these environment variables before starting `codexapp`:
 
 ```bash
 export TELEGRAM_BOT_TOKEN="<your-telegram-bot-token>"
+export TELEGRAM_ALLOWED_USER_IDS="<your-telegram-user-id>,<optional-second-id>"
 export TELEGRAM_DEFAULT_CWD="$PWD" # optional, defaults to current working directory
 npx codexapp
 ```
 
+`TELEGRAM_ALLOWED_USER_IDS` is required for safe access. Only allowlisted Telegram user IDs can use the bridge. If no allowed user IDs are configured, incoming Telegram messages are rejected.
+
+To find your Telegram user ID:
+
+1. Send a message to your bot.
+2. Run `curl "https://api.telegram.org/bot<your-telegram-bot-token>/getUpdates"`.
+3. Read `message.from.id` from the returned update payload.
+
 Bot commands:
 
+- `/start` show quick help and thread picker
+- `/threads` list recent threads and pick one
 - `/newthread` create and map a new Codex thread for this Telegram chat
 - `/thread <threadId>` map current Telegram chat to an existing thread
-- Any other text message is forwarded to the mapped thread
+- `/current` show currently connected thread for this chat
+- `/history` show recent history for current thread
+- `/status` show bridge/mapping status
+- `/whoami` show your Telegram user/chat IDs and authorization state
+- `/help` show command reference
+
+Outgoing assistant messages are sent with Telegram `parse_mode=HTML` for formatting, with automatic plain-text fallback if HTML delivery fails.
 
 ---
 
@@ -152,7 +176,7 @@ Bot commands:
 > **Not just launch. Actual UX upgrades.**
 
 - 🗂️ Searchable project picker in new-thread flow
-- ➕ Inline "Add new project" input inside picker (no browser prompt)
+- ➕ "Create Project" button next to "Select folder" with browser prompt
 - 📌 New projects get pinned to top automatically
 - 🧠 Smart default new-project name suggestion via server-side free-directory scan (`New Project (N)`)
 - 🔄 Project order persisted globally to workspace roots state

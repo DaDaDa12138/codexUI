@@ -21,6 +21,11 @@ function isWindowsLikePath(value: string): boolean {
   return /^[a-z]:[\\/]/iu.test(value) || value.startsWith('\\\\')
 }
 
+export function isAbsoluteLikePath(value: string): boolean {
+  const normalized = normalizePathForUi(value)
+  return normalized.startsWith('/') || isWindowsLikePath(normalized)
+}
+
 export function normalizePathForComparison(value: string): string {
   const normalized = normalizePathForUi(value).replace(/[\\/]+/gu, '/')
   return isWindowsLikePath(normalized) ? normalized.toLowerCase() : normalized
@@ -46,5 +51,11 @@ export function getPathParent(value: string): string {
 
 export function toProjectName(value: string): string {
   const leaf = getPathLeafName(value)
-  return leaf || normalizePathForUi(value) || 'unknown-project'
+  return leaf || normalizePathForUi(value) || 'Projectless'
+}
+
+export function isProjectlessChatPath(value: string): boolean {
+  const normalized = normalizePathForUi(value).replace(/[\\/]+/gu, '/')
+  if (!normalized) return false
+  return /(?:^|\/)Documents\/Codex\/\d{4}-\d{2}-\d{2}\/[^/]+$/u.test(normalized)
 }
